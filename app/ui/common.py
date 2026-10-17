@@ -120,7 +120,7 @@ def css() -> None:
   .ww-draft {background:#FEF3C7;border-color:#F59E0B;color:#78350F;}
   .ww-approved {background:#DCFCE7;border-color:#16A34A;color:#14532D;}
   .ww-platform {font-size:0.78rem;color:#334155;}
-  .ww-big {font-size:2.1rem;font-weight:700;line-height:1.15;}
+  .ww-big {font-size:2.1rem;font-weight:700;line-height:1.15;overflow-wrap:anywhere;}
   .ww-mid {font-size:1.25rem;}
   div[data-testid="stMetricValue"] {font-size:1.5rem;}
   @media print {
