@@ -67,7 +67,9 @@ def chat(conn: sqlite3.Connection, system: str, user: str, max_tokens: int = 350
         raise RuntimeError("language model switched off")
     d = _http(url.rstrip("/") + "/v1/chat/completions",
               {"messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-               "max_tokens": max_tokens, "temperature": temperature}, timeout=120)
+               "max_tokens": max_tokens, "temperature": temperature,
+               # stop at the end of the answer (base models tend to continue with a new chat turn)
+               "stop": ["<|im_start|>", "<|im_end|>", "<|end_of_text|>", "\nuser", "\nUser:"]}, timeout=300)
     return d["choices"][0]["message"]["content"].strip()
 
 
