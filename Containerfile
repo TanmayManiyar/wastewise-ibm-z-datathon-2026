@@ -35,7 +35,7 @@ RUN if [ "$(uname -m)" = "s390x" ]; then \
         pip install -c /app/constraints.txt "pyarrow==${ARROW_VERSION}"; \
     fi
 
-RUN pip install -c /app/constraints.txt streamlit plotly pytest \
+RUN pip install -c /app/constraints.txt streamlit plotly pytest fpdf2 \
     && if [ "$(uname -m)" = "s390x" ]; then \
            pip install -c /app/constraints.txt snapml && \
            pip install -c /app/constraints.txt --no-binary xgboost,lightgbm xgboost lightgbm; \

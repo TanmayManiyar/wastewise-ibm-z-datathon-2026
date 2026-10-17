@@ -67,6 +67,10 @@ Can look at plans, bins and reports; cannot change anything.
   or time; then an alert asks for an extra trip.
 - **Landfill trips**: when the next bin would not fit, the truck goes to the Turbhe landfill, unloads (about 20 min)
   and continues. Every route ends with an unload before the depot.
+- **Evening round**: after the morning plan, WasteWise checks which bins will fill up again and overflow before
+  tomorrow's round, and suggests the best time for a second pickup (Today's plan > Evening round). You can also
+  plan a round at any time and for any bins you choose. It is approved like the morning plan and appears on the
+  crews' phones when their morning route is finished.
 - **Areas (beats)**: each truck has its own part of the ward; it helps elsewhere only when that clearly saves time.
 - **Demonstration data**: in demo mode the sensor history is generated (synthetic) and labelled as such.
 - **Depot and landfill positions** are approximate and must be confirmed with NMMC (Settings > Vehicles & depot).

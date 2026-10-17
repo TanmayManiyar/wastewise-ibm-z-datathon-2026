@@ -43,6 +43,8 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
     if not route:
         st.info(t("no_route", lang))
         return
+    if plan.get("kind") == "extra":
+        st.info(f"🌆 {t('evening', lang)} · {hhmm(plan['start_ts'])}", icon=":material/nights_stay:")
     seen = st.session_state.get(f"{key}_plan_seen")
     if seen and seen != plan["id"]:
         st.warning(t("updated", lang) + f" ({hhmm(plan.get('approved_at'))})", icon=":material/sync:")

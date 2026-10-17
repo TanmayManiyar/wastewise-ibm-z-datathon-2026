@@ -42,7 +42,7 @@ if ! "$VENV/bin/python" -c "import pyarrow" 2>/dev/null; then
     bash "$(dirname "$0")/vm_build_pyarrow.sh"
 fi
 
-"$VENV/bin/pip" install -q -c "$APP_DIR/constraints-s390x.txt" streamlit plotly snapml pytest
+"$VENV/bin/pip" install -q -c "$APP_DIR/constraints-s390x.txt" streamlit plotly snapml pytest fpdf2
 # No s390x wheels: build the gradient-boosting libraries from source (a few minutes each).
 "$VENV/bin/pip" install -q -c "$APP_DIR/constraints-s390x.txt" --no-binary xgboost,lightgbm xgboost lightgbm
 "$VENV/bin/python" - <<'EOF'

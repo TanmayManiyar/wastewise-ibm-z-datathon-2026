@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import streamlit as st
 
-from wastewise import db, planner, roads
+from datetime import datetime
 
-from ui import maps, sheets
+from wastewise import config, db, evening, pdfs, planner, roads
+
+from ui import maps
 from ui.tables import Col, table
 from ui.common import (can, change, conn, duration, hhmm, litres, live_refresh, log, mark_seen, synthetic_notice,
                        today_label, user, when)
@@ -24,8 +26,9 @@ def _new_since(plan: dict) -> tuple[int, int]:
 
 def _plan_choices(day) -> list[dict]:
     c = conn()
-    rows = db.rows(c, "SELECT id, status, kind, created_at, created_by FROM plans WHERE plan_date=? AND kind<>'whatif'"
-                      " AND status<>'superseded' ORDER BY id DESC LIMIT 6", (day.isoformat(),))
+    rows = db.rows(c, "SELECT id, status, kind, created_at, created_by FROM plans WHERE plan_date=?"
+                      " AND kind IN ('daily','replan') AND status<>'superseded' ORDER BY id DESC LIMIT 6",
+                   (day.isoformat(),))
     return rows
 
 
@@ -41,6 +44,14 @@ def _generate(kind: str, base: dict | None = None) -> None:
         st.toast("New plan ready (draft). Check it, then approve.", icon=":material/check_circle:")
     except planner.PlanError as exc:
         st.error(str(exc))
+
+
+def route_pdf(p: dict, routes: list[dict]) -> bytes:
+    """Printable PDF route sheet(s) for the given routes."""
+    c = conn()
+    crew = {r["vehicle_id"]: r["display_name"] for r in
+            db.rows(c, "SELECT vehicle_id, display_name FROM users WHERE role='crew' AND active=1")}
+    return pdfs.route_sheets(p, routes, crew, db.places(c)["depot"]["name"])
 
 
 def summary_card(p: dict) -> None:
@@ -204,7 +215,12 @@ def plan_tab(day) -> None:
                "be: 🔴 already full · 🟠 full by the time the truck arrives · 🟡 over half · 🟢 fine. "
                "Numbers = stop order. Grey = not in today's plan.")
 
-    st.markdown("##### Each truck's route")
+    hdr, btn = st.columns([3, 1])
+    hdr.markdown("##### Each truck's route")
+    if btn.download_button("All trucks (PDF)", route_pdf(p, [r for r in p["routes"] if r["vehicle_id"] in sel]),
+                           file_name=f"route_sheets_{p['plan_date']}.pdf", mime="application/pdf",
+                           key=f"sheets_all_{p['id']}", icon=":material/picture_as_pdf:"):
+        log("route_sheet_downloaded", {"plan_id": p["id"], "vehicle": "all"})
     for r in p["routes"]:
         if r["vehicle_id"] not in sel:
             continue
@@ -218,11 +234,10 @@ def plan_tab(day) -> None:
                         + (f" This truck also helps another area at {t['off_beat_bins']} stop(s)."
                            if t["off_beat_bins"] else ""))
             table(stops, ROUTE_COLS, strong=lambda x: x["kind"] != "bin")
-            crew = db.one(c, "SELECT display_name FROM users WHERE vehicle_id=? AND role='crew'", (r["vehicle_id"],))
-            html = sheets.route_sheet_html(p, r, crew["display_name"] if crew else None)
-            if st.download_button("Printable route sheet", html, file_name=f"route_{p['plan_date']}_{r['vehicle_id']}.html",
-                                  mime="text/html", key=f"sheet_{p['id']}_{r['vehicle_id']}",
-                                  icon=":material/print:"):
+            if st.download_button("Route sheet (PDF)", route_pdf(p, [r]),
+                                  file_name=f"route_sheet_{p['plan_date']}_{r['vehicle_name'].replace(' ', '_')}.pdf",
+                                  mime="application/pdf", key=f"sheet_{p['id']}_{r['vehicle_id']}",
+                                  icon=":material/picture_as_pdf:"):
                 log("route_sheet_downloaded", {"plan_id": p["id"], "vehicle": r["vehicle_id"]})
     if p["unserved"]:
         due = [u for u in p["unserved"] if u["due"]]
@@ -252,6 +267,116 @@ def plan_tab(day) -> None:
             bn = {b["id"]: b["landmark"] for b in db.bins(c, active_only=False)}
             st.markdown("- **Sensors not trusted today** (faulty or offline - their manual readings are used): "
                         + ", ".join(bn.get(x, x) for x in p["bad_sensors"]))
+    if p["kind"] in ("daily", "replan"):
+        evening_section(p)
+
+
+# ------------------------------------------------------------------ evening round
+@st.cache_data(ttl=300, show_spinner="Checking which bins fill up again before tomorrow ...")
+def _assess(plan_id: int, version: int) -> dict:
+    c = db.connect()
+    return evening.assess(c, planner.get(c, plan_id))
+
+
+def evening_section(main: dict) -> None:
+    c = conn()
+    st.divider()
+    st.markdown("### Evening round")
+    ev = planner.current(c, main["plan_date"], round_="extra")
+    a = _assess(main["id"], db.data_version(c))
+    by_id = {b["id"]: b for b in db.bins(c)}
+    if ev is None:
+        if a["candidates"]:
+            first = a["candidates"][0]
+            with st.container(border=True):
+                st.markdown(
+                    f"🟠 **AI recommends an evening round.** {len(a['candidates'])} bin(s) will fill up again after "
+                    f"the morning round and overflow before tomorrow's round - about "
+                    f"**{duration(a['overflow_min_without'])}** of overflowing bins in total, mostly overnight. "
+                    f"The first one is full at **{when(first['full_at'])}** ({first['landmark']}).")
+                st.markdown(f"**Best time: {hhmm(a['suggested_start_ts'])} to {hhmm(a['suggested_end_ts'])}** - "
+                            f"leaves about {duration(a['overflow_min_with'])} of overflow (instead of "
+                            f"{duration(a['overflow_min_without'])}). Earlier, bins would fill up again overnight; "
+                            f"later, they would overflow first.")
+                table([{"place": x["landmark"], "street": x["street"], "full": when(x["full_at"]),
+                        "over": f"about {duration(x['overflow_min'])}",
+                        "map": (by_id[x["bin_id"]]["lat"], by_id[x["bin_id"]]["lon"]) if x["bin_id"] in by_id else None}
+                       for x in a["candidates"]],
+                      [Col("place", "Place"), Col("street", "Street"), Col("full", "Full again at"),
+                       Col("over", "Overflowing before tomorrow's round"), Col("map", "", "map")])
+                if can("generate_plan") and st.button("Plan the evening round at the best time", type="primary",
+                                                      key="ev_suggested"):
+                    _make_evening(main, a["suggested_start_ts"], a["suggested_end_ts"],
+                                  [x["bin_id"] for x in a["candidates"]], a)
+        else:
+            st.success("No evening round needed: no bin is expected to overflow before tomorrow's round.",
+                       icon=":material/check_circle:")
+        if can("generate_plan"):
+            with st.expander("Plan an evening round for a time and bins you choose"):
+                day = datetime.strptime(main["plan_date"], "%Y-%m-%d").date()
+                default = a["suggested_start_ts"] or int(datetime(day.year, day.month, day.day, 16, 0,
+                                                                  tzinfo=config.IST).timestamp())
+                c1, c2 = st.columns(2)
+                t = c1.time_input("Start at", value=datetime.fromtimestamp(default, config.IST).time(), step=900,
+                                  key="ev_time")
+                hours = c2.select_slider("For", [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0], value=3.0, key="ev_hours",
+                                         format_func=lambda h: f"{h:g} hours")
+                chosen = st.multiselect("Bins to collect", list(by_id),
+                                        default=[x["bin_id"] for x in a["candidates"] if x["bin_id"] in by_id],
+                                        format_func=lambda x: f"{by_id[x]['landmark']} - {by_id[x]['street'] or ''}",
+                                        key="ev_bins")
+                if st.button("Plan this round", key="ev_manual", disabled=not chosen):
+                    start = int(datetime.combine(day, t, tzinfo=config.IST).timestamp())
+                    _make_evening(main, start, int(start + hours * 3600), chosen, a)
+        return
+
+    badge = "ww-approved" if ev["status"] == "approved" else "ww-draft"
+    who = (f"approved by {ev['approved_by']} at {hhmm(ev['approved_at'])}" if ev.get("approved_by")
+           else "waiting for a supervisor to approve")
+    st.markdown(f"<span class='ww-badge {badge}'>{ev['status'].upper()}</span> &nbsp; Evening round "
+                f"{hhmm(ev['start_ts'])} to {hhmm(ev['shift_end_ts'])} · {who}", unsafe_allow_html=True)
+    k = ev["kpis"]
+    st.markdown(f"**{k['bins_served']} bin(s)** will be collected again"
+                + (f" - **{k['due_left_out']} do not fit**, choose a longer slot." if k["due_left_out"] else ".")
+                + f" Last truck back by **{hhmm(k['finish_ts'])}**.")
+    b1, b2, _ = st.columns([1, 1.2, 3])
+    if ev["status"] == "draft" and can("approve_plan"):
+        if b1.button("Approve evening round", type="primary", disabled=not ev["verifier"]["ok"], key="ev_approve"):
+            planner.approve(c, ev["id"], user()["username"])
+            mark_seen()
+            st.rerun()
+    if can("generate_plan") and b2.button("Plan it again", key="ev_redo"):
+        with db.tx(c):
+            c.execute("UPDATE plans SET status='superseded' WHERE id=?", (ev["id"],))
+            db.bump_version(c)
+        mark_seen()
+        st.rerun()
+    used = [r for r in ev["routes"] if r["totals"]["bins"]]
+    st.plotly_chart(maps.plan_map(ev, db.places(c), db.bins(c), height=420,
+                                  tiles=db.get_settings(c).get("map_tiles", "osm")),
+                    use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
+    for r in used:
+        t_ = r["totals"]
+        with st.expander(f"**{r['vehicle_name']}** · {t_['bins']} stops · {hhmm(r['start_ts'])} to {hhmm(t_['end_ts'])}"):
+            table(route_rows(r), ROUTE_COLS, strong=lambda x: x["kind"] != "bin")
+    if used and st.download_button("Evening route sheets (PDF)", route_pdf(ev, used),
+                                   file_name=f"evening_route_sheets_{ev['plan_date']}.pdf", mime="application/pdf",
+                                   key=f"ev_pdf_{ev['id']}", icon=":material/picture_as_pdf:"):
+        log("route_sheet_downloaded", {"plan_id": ev["id"], "vehicle": "evening"})
+
+
+def _make_evening(main: dict, start: int, end: int, bins: list[str], a: dict) -> None:
+    c = conn()
+    try:
+        with st.spinner("Planning the evening round ..."):
+            p = evening.plan_round(c, user()["username"], main, start, end, bins, assessment=a)
+        planner.save(c, p, user()["username"])
+        mark_seen()
+        st.rerun()
+    except planner.PlanError as exc:
+        st.error(str(exc))
+
+
 
 def page() -> None:
     live_refresh()
@@ -259,7 +384,7 @@ def page() -> None:
     day = planner.plan_day(c)
     st.title("Today's plan")
     synthetic_notice()
-    tabs = st.tabs(["Plan", "Progress", "Live alerts", "Briefing & driver messages", "Crew phone view"])
+    tabs = st.tabs(["Plan", "Progress", "Live alerts", "Morning briefing & crew messages", "Crew phone view"])
     with tabs[0]:
         plan_tab(day)
     from views import progress, alerts_view, briefing, crew

@@ -5,6 +5,7 @@ LANGS = {"en": "English", "mr": "मराठी", "hi": "हिंदी"}
 T = {
     "title": {"en": "My route", "mr": "माझा मार्ग", "hi": "मेरा रूट"},
     "truck": {"en": "Truck", "mr": "गाडी", "hi": "गाड़ी"},
+    "evening": {"en": "Evening round", "mr": "संध्याकाळची फेरी", "hi": "शाम का राउंड"},
     "small": {"en": "(small)", "mr": "(लहान)", "hi": "(छोटी)"},
     "no_route": {"en": "No approved route yet. Please ask the supervisor.",
                  "mr": "अजून मंजूर मार्ग नाही. कृपया पर्यवेक्षकांना विचारा.",

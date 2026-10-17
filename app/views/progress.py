@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from wastewise import db, progress
+from wastewise import db, pdfs, progress
 
 from ui.common import can, conn, hhmm, log, mark_seen, user
 from ui.tables import Col, table
@@ -43,17 +43,23 @@ def tab(day) -> None:
             return ""
         return "on time" if abs(r["delay_min"]) <= 5 else (f"{r['delay_min']} min late" if r["delay_min"] > 0
                                                            else f"{-r['delay_min']} min early")
-    table([{"truck": r["vehicle_name"], "place": r["landmark"], "planned": hhmm(r["planned_ts"]),
+    evening_too = any(r.get("round") == "Evening" for r in rows)
+    table([{"round": r.get("round", ""), "truck": r["vehicle_name"], "place": r["landmark"], "planned": hhmm(r["planned_ts"]),
             "actual": hhmm(r["actual_ts"]) if r["actual_ts"] else "", "late": late_text(r),
             "status": (STATUS_LABEL[r["status"]], STATUS_COLOUR[r["status"]]),
             "fill": f"{r['fill_reported']:.0f}%" if r["fill_reported"] is not None else "", "by": r["by"] or ""}
            for r in rows],
+          ([Col("round", "Round")] if evening_too else []) +
           [Col("truck", "Truck"), Col("place", "Place"), Col("planned", "Planned"), Col("actual", "Done at"),
            Col("late", ""), Col("status", "Status", "pill"), Col("fill", "How full (crew said)"),
            Col("by", "Recorded by")], max_height=520)
-    csv = progress.to_csv(rows, hhmm)
-    if st.download_button("End-of-shift report (CSV)", csv, file_name=f"wastewise_progress_{d}.csv", mime="text/csv",
-                          icon=":material/download:"):
+    a, b, _ = st.columns([1, 1, 2])
+    pdf = pdfs.shift_report(d, rows, summ, STATUS_LABEL, demo=bool(db.get_meta(c, "synthetic_info")))
+    if a.download_button("End-of-shift report (PDF)", pdf, file_name=f"end_of_shift_{d}.pdf",
+                         mime="application/pdf", icon=":material/picture_as_pdf:"):
+        log("progress_pdf_downloaded", {"date": d})
+    if b.download_button("Same as spreadsheet (CSV)", progress.to_csv(rows, hhmm), file_name=f"end_of_shift_{d}.csv",
+                         mime="text/csv", icon=":material/download:"):
         log("progress_csv_downloaded", {"date": d})
 
     if can("record_progress"):

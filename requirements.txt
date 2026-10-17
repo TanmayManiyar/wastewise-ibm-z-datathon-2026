@@ -10,3 +10,4 @@ plotly>=5.20
 lightgbm>=4.3      # built from source on s390x (no wheel)
 xgboost>=2.0       # built from source on s390x (no wheel)
 # IBM Snap ML (s390x wheel; proprietary licence, free to use) is installed on LinuxONE only: pip install snapml
+fpdf2>=2.7       # PDF route sheets and reports (pure Python, LGPL)

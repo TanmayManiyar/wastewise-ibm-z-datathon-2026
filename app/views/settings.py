@@ -68,7 +68,6 @@ def settings_tab() -> None:
                            int(s["collect_threshold_pct"]), 5)
             bp = b.number_input("Cost of serving another truck's area (minutes)", 0.0, 120.0,
                                 float(s["beat_penalty_min"]), 1.0)
-            secs = d.slider("Optimiser time (seconds)", 2, 30, int(s["optimiser_seconds"]))
             a, b, d = st.columns(3)
             fuel = a.number_input("Fuel use (L per km)", 0.05, 2.0, float(s["fuel_l_per_km"]), 0.01)
             co2 = b.number_input("CO₂ per litre of diesel (kg)", 1.0, 4.0, float(s["co2_kg_per_l_diesel"]), 0.01)
@@ -86,7 +85,7 @@ def settings_tab() -> None:
                                   ("shift_hours", shift_hours, "shift length"), ("service_min_base", sb, "time per bin"),
                                   ("service_min_per_1000l", sk, "time per 1000 L"), ("late_threshold_min", late, "late"),
                                   ("collect_threshold_pct", float(thr), "threshold"), ("beat_penalty_min", bp, "beats"),
-                                  ("optimiser_seconds", float(secs), "optimiser time"), ("fuel_l_per_km", fuel, "fuel"),
+                                  ("fuel_l_per_km", fuel, "fuel"),
                                   ("co2_kg_per_l_diesel", co2, "CO2"), ("map_tiles", tiles, "map")):
                     _save_setting(k, v, lbl)
                 if unload != db.places(c)["landfill"]["unload_min"]:

@@ -23,12 +23,20 @@ def _basis_text(basis: str, ts) -> str:
     return f"{word}, {when(ts)}" if ts else word
 
 
+def _when_rel(ts: int, now: int) -> str:
+    from datetime import datetime
+    from wastewise import config
+    d, n = datetime.fromtimestamp(ts, config.IST), datetime.fromtimestamp(now, config.IST)
+    day = "today" if d.date() == n.date() else "tomorrow" if (d.date() - n.date()).days == 1 else d.strftime("%a")
+    return f"{day} {d.strftime('%H:%M')}"
+
+
 def bin_label(b: dict) -> str:
     return f"{b['landmark']} - {b['street'] or ''}"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _status(version: int) -> tuple[dict, dict, dict]:
+def _status(version: int) -> tuple[dict, dict, dict, dict]:
     """Current fill estimate per bin (cached per data version)."""
     c = db.connect()
     now = db.now()
@@ -37,13 +45,25 @@ def _status(version: int) -> tuple[dict, dict, dict]:
     fills = {b: s.fill for b, s in st_.items()}
     status = {b: ("red" if f >= 100 else "amber" if f >= 50 else "green") for b, f in fills.items()}
     basis = {b: _basis_text(s.basis, s.basis_ts) for b, s in st_.items()}
-    return fills, status, basis
+    full_at = {}
+    for b, s_ in st_.items():
+        if s_.fill >= 100:
+            full_at[b] = "full now"
+            continue
+        f, t = s_.fill, now
+        for _ in range(48 * 6):          # 10-minute steps, up to 2 days ahead
+            f += state.growth_between(prof[b], t, t + 600)
+            t += 600
+            if f >= 100:
+                break
+        full_at[b] = _when_rel(t, now) if f >= 100 else "not in the next 2 days"
+    return fills, status, basis, full_at
 
 
 def status_tab() -> None:
     c = conn()
     bins = db.bins(c)
-    fills, status, basis = _status(db.data_version(c))
+    fills, status, basis, full_at = _status(db.data_version(c))
     vehicles = {v["id"]: v for v in db.vehicles(c, active_only=False)}
     bmap = beats.load(c)
     colour = {b: vehicles[v]["color"] for b, v in bmap.items() if v in vehicles}
@@ -70,10 +90,12 @@ def status_tab() -> None:
             continue
         rows.append({"place": b["landmark"], "street": b["street"], "type": SITE_LABEL.get(b["site_type"], b["site_type"]),
                      "fill": f, "status": STATUS_PILL[status[b["id"]]], "basis": basis.get(b["id"], ""),
+                     "full_at": full_at.get(b["id"], ""),
                      "every": "every day" if b["collect_every_days"] == 1 else f"every {b['collect_every_days']} days",
                      "area": vname.get(bmap.get(b["id"], ""), "-"), "map": (b["lat"], b["lon"])})
     table(rows, [Col("place", "Place"), Col("street", "Street"), Col("type", "Type"),
                  Col("fill", "How full now (estimate)", "bar"), Col("status", "Status", "pill"),
+                 Col("full_at", "Full at"),
                  Col("basis", "Based on"), Col("every", "Collected"), Col("area", "Truck area"),
                  Col("map", "", "map")], max_height=620)
     if can("edit_bins"):

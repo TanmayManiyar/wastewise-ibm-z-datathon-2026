@@ -18,11 +18,30 @@ ACTIONS = {
 DONE_KINDS = ("collected", "could_not_reach", "bin_missing")
 
 
-def day_plans(conn: sqlite3.Connection, day: str) -> list[dict]:
-    """Plans that were approved for the day (oldest first, including those later replaced)."""
-    ids = [r[0] for r in conn.execute("SELECT id FROM plans WHERE plan_date=? AND approved_at IS NOT NULL"
-                                      " AND kind<>'whatif' ORDER BY id", (day,))]
+def day_plans(conn: sqlite3.Connection, day: str, round_: str | None = None) -> list[dict]:
+    """Plans that were approved for the day (oldest first, including those later replaced).
+    round_: None = all, "main" = the regular shift, "extra" = the evening round."""
+    kinds = {"main": "('daily','replan')", "extra": "('extra')"}.get(round_, "('daily','replan','extra')")
+    ids = [r[0] for r in conn.execute(f"SELECT id FROM plans WHERE plan_date=? AND approved_at IS NOT NULL"
+                                      f" AND kind IN {kinds} ORDER BY id", (day,))]
     return [planner.get(conn, i) for i in ids]
+
+
+def _round(plan: dict) -> str:
+    return "extra" if plan.get("kind") == "extra" else "main"
+
+
+def _window(conn: sqlite3.Connection, day: str, round_: str) -> tuple[int, int]:
+    """Time window in which crew updates belong to this round."""
+    settings = db.get_settings(conn)
+    shift_start, shift_end = planner.shift_window(settings, __import__("datetime").date.fromisoformat(day))
+    extras = day_plans(conn, day, "extra")
+    if round_ == "extra":
+        if not extras:
+            return shift_end, shift_end
+        return min(p["start_ts"] for p in extras) - 1800, max(p["shift_end_ts"] for p in extras) + 4 * 3600
+    end = (min(p["start_ts"] for p in extras) - 1800) if extras else shift_end + 4 * 3600
+    return shift_start - 3600, end
 
 
 def planned_stops(plans: list[dict]) -> dict[str, dict]:
@@ -39,38 +58,42 @@ def planned_stops(plans: list[dict]) -> dict[str, dict]:
 
 
 def status_rows(conn: sqlite3.Connection, day: str, now_ts: int, late_min: int | None = None) -> list[dict]:
-    plans = day_plans(conn, day)
-    if not plans:
-        return []
     settings = db.get_settings(conn)
     late_min = late_min if late_min is not None else int(settings["late_threshold_min"])
-    shift_start, shift_end = planner.shift_window(settings, __import__("datetime").date.fromisoformat(day))
-    planned = planned_stops(plans)
-    ids = [p["id"] for p in plans]
     rows = []
-    for bid, p in sorted(planned.items(), key=lambda kv: (kv[1]["vehicle_id"], kv[1]["planned_ts"])):
-        # A crew update counts if it belongs to one of the day's plans (even when tapped before the shift,
-        # e.g. in a rehearsal) or was made during the shift window.
-        e = db.one(conn, "SELECT * FROM events WHERE bin_id=? AND kind IN ('collected','could_not_reach','bin_missing')"
-                         f" AND (plan_id IN ({','.join('?' * len(ids))}) OR ts BETWEEN ? AND ?) ORDER BY ts DESC LIMIT 1",
-                   (bid, *ids, shift_start - 3600, shift_end + 4 * 3600))
-        row = dict(p, actual_ts=None, fill_reported=None, delay_min=None, by=None)
-        if e:
-            row.update(actual_ts=e["ts"], fill_reported=e["fill_before"], by=e["user"])
-            row["delay_min"] = round((e["ts"] - p["planned_ts"]) / 60)
-            if e["kind"] == "collected":
-                row["status"] = "late" if row["delay_min"] > late_min else "collected"
+    for round_ in ("main", "extra"):
+        plans = day_plans(conn, day, round_)
+        if not plans:
+            continue
+        lo, hi = _window(conn, day, round_)
+        round_end = (max(p["shift_end_ts"] for p in plans) if round_ == "extra"
+                     else planner.shift_window(settings, __import__("datetime").date.fromisoformat(day))[1])
+        ids = [p["id"] for p in plans]
+        planned = planned_stops(plans)
+        for bid, p in sorted(planned.items(), key=lambda kv: (kv[1]["vehicle_id"], kv[1]["planned_ts"])):
+            # A crew update counts if it belongs to one of this round's plans (even when tapped before the
+            # shift, e.g. in a rehearsal) or was made during this round's time window.
+            e = db.one(conn, "SELECT * FROM events WHERE bin_id=? AND kind IN ('collected','could_not_reach','bin_missing')"
+                             f" AND (plan_id IN ({','.join('?' * len(ids))}) OR ts BETWEEN ? AND ?) ORDER BY ts DESC LIMIT 1",
+                       (bid, *ids, lo, hi))
+            row = dict(p, actual_ts=None, fill_reported=None, delay_min=None, by=None,
+                       round="Evening" if round_ == "extra" else "Morning")
+            if e:
+                row.update(actual_ts=e["ts"], fill_reported=e["fill_before"], by=e["user"])
+                row["delay_min"] = round((e["ts"] - p["planned_ts"]) / 60)
+                if e["kind"] == "collected":
+                    row["status"] = "late" if row["delay_min"] > late_min else "collected"
+                else:
+                    row["status"] = e["kind"]
+            elif now_ts >= round_end:
+                row["status"] = "missed"
+            elif now_ts > p["planned_ts"] + late_min * 60:
+                row["status"] = "overdue"
+                row["delay_min"] = round((now_ts - p["planned_ts"]) / 60)
             else:
-                row["status"] = e["kind"]
-        elif now_ts >= shift_end:
-            row["status"] = "missed"
-        elif now_ts > p["planned_ts"] + late_min * 60:
-            row["status"] = "overdue"
-            row["delay_min"] = round((now_ts - p["planned_ts"]) / 60)
-        else:
-            row["status"] = "pending"
-        row["action"] = ACTIONS.get(row["status"], "")
-        rows.append(row)
+                row["status"] = "pending"
+            row["action"] = ACTIONS.get(row["status"], "")
+            rows.append(row)
     return rows
 
 
@@ -106,19 +129,29 @@ def to_csv(rows: list[dict], fmt_time) -> str:
 
 # ------------------------------------------------------------------ crew side
 def route_for(conn: sqlite3.Connection, day: str, vehicle_id: str) -> tuple[dict | None, dict | None]:
-    p = planner.current(conn, day)
-    if not p or p["status"] != "approved":
-        return None, None
-    r = next((x for x in p["routes"] if x["vehicle_id"] == vehicle_id), None)
-    return p, r
+    """The crew's current route: the morning route until it is finished, then the approved evening round."""
+    out = (None, None)
+    for round_ in ("main", "extra"):
+        p = planner.current(conn, day, round_=round_)
+        if not p or p["status"] != "approved":
+            continue
+        r = next((x for x in p["routes"] if x["vehicle_id"] == vehicle_id and x["stops"]), None)
+        if r is None:
+            continue
+        if round_ == "main" and all(s_ == "done" for s_, stp in zip(stop_states(conn, p, r), r["stops"])
+                                     if stp["kind"] == "bin"):
+            out = (p, r)       # morning finished: show the evening route if there is one
+            continue
+        return p, r
+    return out
 
 
 def stop_states(conn: sqlite3.Connection, plan: dict, route: dict) -> list[str]:
     """'done' / 'todo' for each stop of the route, from crew updates."""
-    settings = db.get_settings(conn)
-    shift_start, _ = planner.shift_window(settings, __import__("datetime").date.fromisoformat(plan["plan_date"]))
-    since = shift_start - 3600
-    ids = [p["id"] for p in day_plans(conn, plan["plan_date"])] or [plan["id"]]
+    since, _ = _window(conn, plan["plan_date"], _round(plan))
+    if _round(plan) == "extra":
+        since = plan["start_ts"] - 1800
+    ids = [p["id"] for p in day_plans(conn, plan["plan_date"], _round(plan))] or [plan["id"]]
     if plan["id"] not in ids:
         ids.append(plan["id"])
     unloads = conn.execute("SELECT COUNT(*) FROM events WHERE kind='landfill_unload' AND vehicle_id=? AND plan_id=?",

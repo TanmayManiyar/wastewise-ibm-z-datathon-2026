@@ -66,6 +66,16 @@ def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
                         "text": f"{r['vehicle_name']} at {r['landmark']}: {STATUS_TEXT[r['status']]}"
                                 + (f" ({r['delay_min']} min)" if r["delay_min"] else ""),
                         "action": r["action"]})
+    # Evening round: recommended but not planned yet.
+    main = planner.current(conn, day)
+    if main and main["status"] == "approved" and planner.current(conn, day, round_="extra") is None:
+        from . import evening
+        a = evening.assess_cached(conn, main)
+        if a["candidates"]:
+            out.append({"level": "warning", "kind": "evening", "ts": now_ts,
+                        "text": f"{len(a['candidates'])} bin(s) will overflow again before tomorrow's round "
+                                f"(first one full at {_hm(a['candidates'][0]['full_at'])}).",
+                        "action": f"Plan the evening round under Today's plan - best time {_hm(a['suggested_start_ts'])}."})
     order = {"critical": 0, "warning": 1, "info": 2}
     out.sort(key=lambda a: (order[a["level"]], -(a["ts"] or 0)))
     return out

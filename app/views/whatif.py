@@ -20,7 +20,7 @@ ROWS = [("bins_served", "Bins collected", lambda v: f"{v:.0f} bins", +1),
         ("landfill_trips", "Landfill trips", lambda v: f"{v:.0f}", 0)]
 
 
-def _run(scenario: dict | None, seconds: float) -> dict:
+def _run(scenario: dict | None) -> dict:
     c = conn()
     shift = planner.in_shift(c)
     base = None
@@ -28,15 +28,16 @@ def _run(scenario: dict | None, seconds: float) -> dict:
         base = planner.current(c, planner.plan_day(c))
         if not base or base["status"] != "approved":
             raise planner.PlanError("During the shift a what-if starts from the approved plan - approve one first.")
+    # Same search for both plans: it runs until it stops finding better routes.
     return planner.generate(c, user()["username"], kind="replan" if shift else "daily", scenario=scenario,
-                            seconds=seconds, replan_of=base)
+                            replan_of=base)
 
 
 def comparison_rows(normal: dict, what: dict) -> list[dict]:
     rows = []
     for key, label, show, better in ROWS:
         a, b = normal["kpis"][key], what["kpis"][key]
-        if round(b - a, 1) == 0:
+        if show(a) == show(b) or show(abs(b - a)) in ("0 km", "0 L", "0 kg", "0 bins", "0", "0 min"):
             ch = ("no change", "grey")
         else:
             good = (b - a) * better > 0
@@ -76,7 +77,6 @@ def page() -> None:
             st.markdown("**An extra truck**")
             extra = st.checkbox("Add a spare truck for the day")
             extra_cap = st.select_slider("Its size (litres)", [6000, 9000, 12000], value=6000)
-        seconds = st.slider("Time to search for good routes (seconds per plan)", 3, 15, 6)
         go = st.form_submit_button("Compare", type="primary")
     if go:
         scenario: dict = {}
@@ -93,8 +93,8 @@ def page() -> None:
             return
         try:
             with st.spinner("Planning a normal day and the situation ..."):
-                normal = _run(None, seconds)
-                what = _run(scenario, seconds)
+                normal = _run(None)
+                what = _run(scenario)
         except planner.PlanError as exc:
             st.error(str(exc))
             return

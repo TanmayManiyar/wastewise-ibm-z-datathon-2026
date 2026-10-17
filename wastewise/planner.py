@@ -20,6 +20,8 @@ from . import audit, baseline, beats as beats_mod, config, db, geo, optimiser, r
 from .synth import plan_day_for
 
 HORIZON_MIN = 24 * 60 + 60
+SEARCH_PATIENCE = 800      # stop after this many iterations without a better plan
+SEARCH_CAP_S = 20.0        # safety cap on search time
 
 
 class PlanError(Exception):
@@ -93,7 +95,9 @@ class Context:
 
 def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str = "daily",
                   scenario: dict | None = None, bad_sensors: set[str] | None = None,
-                  plan_for_replan: dict | None = None) -> Context:
+                  plan_for_replan: dict | None = None, extra: dict | None = None) -> Context:
+    """kind: daily | replan | extra. For an extra (evening) round, `extra` gives plan_date, start_ts,
+    end_ts, the bins to collect and assume_collected {bin_id: planned morning collection time}."""
     now_ts = now_ts or db.now()
     scenario = scenario or {}
     settings = db.get_settings(conn)
@@ -110,9 +114,17 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
     net = roads.network_for(conn)
     places = db.places(conn)
 
-    day = plan_day(conn, now_ts) if kind != "replan" else datetime.fromtimestamp(now_ts, config.IST).date()
-    shift_start, shift_end = shift_window(settings, day)
-    if kind == "replan":
+    if kind == "extra":
+        day = date.fromisoformat(extra["plan_date"])
+        shift_start, shift_end = int(extra["start_ts"]), int(extra["end_ts"])
+        if shift_end <= max(shift_start, now_ts):
+            raise PlanError("This time slot is already over - choose a later time")
+    else:
+        day = plan_day(conn, now_ts) if kind != "replan" else datetime.fromtimestamp(now_ts, config.IST).date()
+        shift_start, shift_end = shift_window(settings, day)
+    if kind == "extra":
+        start_ts = max(shift_start, now_ts)
+    elif kind == "replan":
         if not (shift_start <= now_ts < shift_end):
             raise PlanError("Re-planning is only possible during shift hours "
                             f"({settings['shift_start']} for {settings['shift_hours']} h)")
@@ -142,6 +154,16 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
             if geo.haversine_m(clat, clon, b["lat"], b["lon"]) <= float(sg.get("radius_m", 400)):
                 rates[bid] = rates[bid] * float(sg.get("factor", 1.8))
     due = due_status(conn, bins_all, day, now_ts)
+    if kind == "extra":
+        # Bins on the morning route count as emptied at their planned time until the crew reports it.
+        for bid, t_col in (extra.get("assume_collected") or {}).items():
+            cur = st.get(bid)
+            if cur and t_col < start_ts and (cur.collected_ts is None or cur.collected_ts < t_col - 1800):
+                g = state.growth_between(profiles[bid], int(t_col), start_ts)
+                st[bid] = state.BinState(bid, state.RESIDUAL_PCT + g, 3.0 + 0.2 * g, "planned morning collection",
+                                         int(t_col), int(t_col))
+        wanted = set(extra["bins"])
+        due = {b: {"due": b in wanted, "days_since": None, "last_ts": None} for b in bins}
 
     # Candidates: due bins must be served; others only if they will be fairly full.
     ids_all = sorted(bins)
@@ -153,6 +175,10 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
     cand = []
     for i, bid in enumerate(ids_all):
         if bid in excluded:
+            continue
+        if kind == "extra":
+            if due[bid]["due"]:
+                cand.append(i)
             continue
         if due[bid]["due"]:
             cand.append(i)
@@ -365,7 +391,8 @@ def verify_context(ctx: Context) -> dict:
 
 def generate(conn: sqlite3.Connection, user: str | None = None, kind: str = "daily", now_ts: int | None = None,
              scenario: dict | None = None, seconds: float | None = None, max_iter: int = 100_000, seed: int = 1,
-             bad_sensors: set[str] | None = None, replan_of: dict | None = None) -> dict:
+             bad_sensors: set[str] | None = None, replan_of: dict | None = None,
+             extra: dict | None = None) -> dict:
     now_ts = now_ts or db.now()
     if bad_sensors is None:
         try:
@@ -373,10 +400,23 @@ def generate(conn: sqlite3.Connection, user: str | None = None, kind: str = "dai
             bad_sensors = anomaly.faulty_sensors(conn, now_ts)
         except ImportError:
             bad_sensors = set()
-    ctx = build_context(conn, now_ts, kind if kind != "whatif" else "daily", scenario, bad_sensors, replan_of)
+    ctx = build_context(conn, now_ts, kind if kind != "whatif" else "daily", scenario, bad_sensors, replan_of,
+                        extra)
     settings = ctx.settings
-    seconds = float(settings["optimiser_seconds"] if seconds is None else seconds)
-    sol, stats = optimiser.solve(ctx.prob, seconds=seconds, max_iter=max_iter, seed=seed)
+    # The search runs until it stops finding better plans (safety cap 20 s) unless a caller fixes the time.
+    patience = None if seconds is not None else SEARCH_PATIENCE
+    seconds = float(SEARCH_CAP_S if seconds is None else seconds)
+    sol, stats = optimiser.solve(ctx.prob, seconds=seconds, max_iter=max_iter, seed=seed, patience=patience)
+    if patience is not None and ctx.prob.nb:
+        # One restart from the best plan with fresh exploration: makes the result consistent across runs.
+        sol2, st2 = optimiser.solve(ctx.prob, seconds=seconds, max_iter=max_iter, seed=seed + 1000,
+                                    patience=patience, start=sol)
+        stats.iterations += st2.iterations
+        stats.seconds += st2.seconds
+        if sol2.total < sol.total - 1e-6:
+            sol = sol2
+            stats.best_cost = sol2.total
+            stats.improvements += st2.improvements
     prob = ctx.prob
 
     routes = [_route_json(ctx, k, r) for k, r in enumerate(sol.routes)]
@@ -436,8 +476,9 @@ def approve(conn: sqlite3.Connection, plan_id: int, user: str) -> None:
     if not p["verifier"]["ok"]:
         raise PlanError("This plan failed the independent check and cannot be approved")
     with db.tx(conn):
-        conn.execute("UPDATE plans SET status='superseded' WHERE plan_date=? AND status='approved' AND id<>?",
-                     (p["plan_date"], plan_id))
+        same = "('extra')" if p["kind"] == "extra" else "('daily','replan','whatif')"
+        conn.execute(f"UPDATE plans SET status='superseded' WHERE plan_date=? AND status='approved' AND id<>?"
+                     f" AND kind IN {same}", (p["plan_date"], plan_id))
         conn.execute("UPDATE plans SET status='approved', approved_by=?, approved_at=? WHERE id=?",
                      (user, db.now(), plan_id))
         audit.log(conn, user, "plan_approved", {"plan_id": plan_id, "date": p["plan_date"]})
@@ -454,12 +495,14 @@ def get(conn: sqlite3.Connection, plan_id: int) -> dict | None:
     return body
 
 
-def current(conn: sqlite3.Connection, day: date | str) -> dict | None:
-    """The approved plan for a day, else the newest draft."""
+def current(conn: sqlite3.Connection, day: date | str, round_: str = "main") -> dict | None:
+    """The approved plan for a day, else the newest draft. round_ "main" = the regular shift (daily plans
+    and re-plans), "extra" = the evening round."""
     d = day if isinstance(day, str) else day.isoformat()
-    r = db.one(conn, "SELECT id FROM plans WHERE plan_date=? AND status='approved' AND kind<>'whatif'"
+    kinds = "('extra')" if round_ == "extra" else "('daily','replan')"
+    r = db.one(conn, f"SELECT id FROM plans WHERE plan_date=? AND status='approved' AND kind IN {kinds}"
                      " ORDER BY id DESC LIMIT 1", (d,))
     if not r:
-        r = db.one(conn, "SELECT id FROM plans WHERE plan_date=? AND status='draft' AND kind<>'whatif'"
+        r = db.one(conn, f"SELECT id FROM plans WHERE plan_date=? AND status='draft' AND kind IN {kinds}"
                          " ORDER BY id DESC LIMIT 1", (d,))
     return get(conn, r["id"]) if r else None

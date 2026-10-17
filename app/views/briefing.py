@@ -1,11 +1,25 @@
-"""Briefing & driver messages: Granite-written (checked against the plan) or the built-in templates."""
+"""Morning briefing & crew messages.
+
+Purpose: turn the approved plan into (1) a short briefing the supervisor reads out at the morning
+meeting and (2) a ready-to-send message for each truck's crew in English, Hindi or Marathi, for
+crews who do not use the app. Every figure comes straight from the plan. If the local IBM Granite
+model is running, it can reword the text; its wording is only shown if every figure checks out.
+"""
 from __future__ import annotations
+
+import urllib.parse
 
 import streamlit as st
 
-from wastewise import audit, db, llm, planner
+from wastewise import audit, llm, planner
 
-from ui.common import conn, user
+from ui.common import conn, today_label, user
+
+
+def _share(text: str, key: str) -> None:
+    st.link_button("Share on WhatsApp", "https://wa.me/?" + urllib.parse.urlencode({"text": text}),
+                   icon=":material/share:", help="Opens WhatsApp with the message filled in - you choose the "
+                                                  "contact and press Send.")
 
 
 def tab(day) -> None:
@@ -14,26 +28,30 @@ def tab(day) -> None:
     if not p:
         st.info("Generate a plan first.")
         return
+    st.caption("What this is for: a short briefing to read out at the morning meeting, and a ready-made message for "
+               "each truck's crew in their language - for crews who do not use the app. Every figure comes "
+               "straight from the plan.")
     stt = llm.status(c)
-    if stt["ok"]:
-        st.session_state._llm_label = "Granite"
-        st.caption(f"Language model: {stt['model']} on this server. Every figure it writes is checked against the "
-                   "plan; if one does not match, the checked template is shown instead.")
-    else:
-        st.caption(f"Language model not available ({stt['error']}). The built-in templates below are generated "
-                   "directly from the plan.")
-    use = stt["ok"]
 
-    st.subheader("Pre-shift briefing")
+    st.markdown(f"#### Morning briefing · {today_label(p['plan_date'])}")
     key = f"brief_{p['id']}"
-    if st.button("Write the briefing", type="primary", key="brief_btn"):
-        with st.spinner("Writing ..."):
-            st.session_state[key] = llm.briefing(c, p, use_llm=use)
-        audit.log(c, user()["username"], "briefing_written", {"plan_id": p["id"], "source": st.session_state[key]["source"]})
     res = st.session_state.get(key) or llm.briefing(c, p, use_llm=False)
-    _show(res)
+    lines = res["text"].splitlines()
+    with st.container(border=True):
+        st.markdown(f"**{lines[0]}**" if lines else "")
+        for line in lines[1:]:
+            st.markdown(f"- {line}")
+    a, b, _ = st.columns([1, 1.4, 2])
+    with a:
+        _share(res["text"], key)
+    if stt["ok"] and b.button("Let Granite reword it", key="brief_btn"):
+        with st.spinner("Writing ..."):
+            st.session_state[key] = llm.briefing(c, p, use_llm=True)
+        audit.log(c, user()["username"], "briefing_written", {"plan_id": p["id"], "source": st.session_state[key]["source"]})
+        st.rerun()
+    _note(res)
 
-    st.subheader("Driver messages")
+    st.markdown("#### Messages for the crews")
     names = {r["vehicle_id"]: r["vehicle_name"] for r in p["routes"] if r["totals"]["bins"]}
     if not names:
         return
@@ -42,25 +60,24 @@ def tab(day) -> None:
     lang = b.segmented_control("Language", list(llm.LANG_NAMES), default="en", key="dm_lang",
                                format_func={"en": "English", "hi": "हिंदी", "mr": "मराठी"}.get) or "en"
     mkey = f"dm_{p['id']}_{vid}_{lang}"
-    if st.button("Write the message", key="dm_btn"):
+    msg = st.session_state.get(mkey) or llm.driver_message(c, p, vid, lang, use_llm=False)
+    with st.container(border=True):
+        st.markdown(msg["text"])
+    a, b, _ = st.columns([1, 1.4, 2])
+    with a:
+        _share(msg["text"], mkey)
+    if stt["ok"] and b.button("Let Granite reword it", key="dm_btn"):
         with st.spinner("Writing ..."):
-            st.session_state[mkey] = llm.driver_message(c, p, vid, lang, use_llm=use)
+            st.session_state[mkey] = llm.driver_message(c, p, vid, lang, use_llm=True)
         audit.log(c, user()["username"], "driver_message_written",
                   {"plan_id": p["id"], "vehicle": vid, "lang": lang, "source": st.session_state[mkey]["source"]})
-    _show(st.session_state.get(mkey) or llm.driver_message(c, p, vid, lang, use_llm=False))
-    st.caption("Copy the message with the button at the top right of the box and send it on the crew's phone.")
+        st.rerun()
+    _note(msg)
 
 
-def _show(res: dict) -> None:
-    st.code(res["text"], language=None, wrap_lines=True)
-    src = res["source"]
-    if src == "Granite":
-        st.caption(f"Written by IBM Granite · check passed ({res['check']['numbers_checked']} figures matched the plan)")
-    else:
-        st.caption("Built-in template (figures taken directly from the plan)")
-    if res.get("error"):
-        st.warning(res["error"])
-        if res.get("rejected"):
-            with st.expander("Rejected text"):
-                st.write(res["rejected"])
-                st.write("Not in the plan:", res["check"]["unknown_numbers"] + res["check"]["unknown_bins"])
+def _note(res: dict) -> None:
+    if res["source"] == "Granite":
+        st.caption("Reworded by IBM Granite on this server - all figures checked against the plan.")
+    elif res.get("error"):
+        st.caption("Granite's wording was not used because it did not match the plan; this text comes straight "
+                   "from the plan.")

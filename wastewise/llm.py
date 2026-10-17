@@ -135,8 +135,34 @@ def check(text: str, facts: dict, required: list[str] | None = None) -> dict:
 
 
 # ------------------------------------------------------------------ templates (always correct)
+EVENING_LINE = {
+    "planned": {"en": "Evening round ({status}): {bins} bins from {start}, back by {back}.",
+                "hi": "शाम का राउंड ({status}): {bins} डिब्बे, {start} बजे से, {back} बजे तक वापसी।",
+                "mr": "संध्याकाळची फेरी ({status}): {bins} डबे, {start} वाजल्यापासून, {back} पर्यंत परत."},
+    "recommended": {"en": "Evening round recommended: {bins} bins will overflow again before tomorrow - best start "
+                          "{start}.", "hi": "", "mr": ""},
+}
+
+
+def evening_facts(conn, main_plan: dict) -> dict | None:
+    """Facts about the day's evening round: planned, or recommended by the AI."""
+    from . import evening, planner
+    ev = planner.current(conn, main_plan["plan_date"], round_="extra")
+    if ev is not None:
+        return {"planned": True, "status": ev["status"], "start": _hm(ev["start_ts"]),
+                "back": _hm(ev["kpis"]["finish_ts"]), "bins": ev["kpis"]["bins_served"],
+                "routes": {r["vehicle_id"]: {"bins": r["totals"]["bins"], "start": _hm(r["start_ts"])}
+                           for r in ev["routes"] if r["totals"]["bins"]}}
+    if main_plan.get("id"):
+        a = evening.assess_cached(conn, main_plan)
+        if a["candidates"]:
+            return {"planned": False, "bins": len(a["candidates"]), "start": _hm(a["suggested_start_ts"])}
+    return None
+
+
 def template_briefing(f: dict) -> str:
-    lines = [f"Pre-shift briefing for {f['date']}: {f['trucks']} trucks will collect {f['bins_total']} bins "
+    nice = datetime.strptime(f["date"], "%Y-%m-%d").strftime("%A %d %B %Y")
+    lines = [f"Morning briefing for {nice}: {f['trucks']} trucks will collect {f['bins_total']} bins "
              f"({f['distance_km']} km, {f['landfill_trips']} landfill trips). The last truck should be back by "
              f"{f['last_truck_back']}."]
     for r in f["routes"]:
@@ -147,6 +173,10 @@ def template_briefing(f: dict) -> str:
         lines.append(s)
     if f["due_left_out"]:
         lines.append(f"{f['due_left_out']} due bins do not fit today - arrange an extra trip.")
+    ev = f.get("evening_round")
+    if ev:
+        key = "planned" if ev["planned"] else "recommended"
+        lines.append(EVENING_LINE[key]["en"].format(**{k: ev.get(k, "") for k in ("status", "bins", "start", "back")}))
     for a in f["alerts"]:
         lines.append("Note: " + a)
     return "\n".join(lines)
@@ -163,11 +193,19 @@ DRIVER = {
 URGENT_WORD = {"en": " Go first to: ", "hi": " पहले यहाँ जाएँ: ", "mr": " आधी इथे जा: "}
 
 
+EVENING_DRIVER = {"en": " Evening round: {bins} bins from {start}.",
+                  "hi": " शाम का राउंड: {bins} डिब्बे, {start} बजे से।",
+                  "mr": " संध्याकाळची फेरी: {bins} डबे, {start} वाजल्यापासून."}
+
+
 def template_driver(r: dict, lang: str) -> str:
     urgent = (URGENT_WORD[lang] + "; ".join(r["urgent_stops"]) + ".") if r["urgent_stops"] else ""
-    return DRIVER[lang].format(truck=r["truck"], bins=r["bins"], start=r["start"], first=r["first_stop"],
+    text = DRIVER[lang].format(truck=r["truck"], bins=r["bins"], start=r["start"], first=r["first_stop"],
                                first_time=r["first_stop_time"], lf=r["landfill_trips"], back=r["back_by"],
                                urgent=urgent)
+    if r.get("evening"):
+        text += EVENING_DRIVER[lang].format(**r["evening"])
+    return text
 
 
 # ------------------------------------------------------------------ generation with checking
@@ -195,6 +233,9 @@ def _generate(conn, prompt: str, facts: dict, fallback: str, use_llm: bool, requ
 
 def briefing(conn: sqlite3.Connection, plan: dict, use_llm: bool = True) -> dict:
     f = plan_facts(plan)
+    ev = evening_facts(conn, plan)
+    if ev:
+        f["evening_round"] = {k: v for k, v in ev.items() if k != "routes"}
     prompt = ("Write the pre-shift briefing (at most 120 words, English) for the ward supervisor from these "
               "facts:\n" + json.dumps(f, ensure_ascii=False))
     return _generate(conn, prompt, f, template_briefing(f), use_llm, [str(f["bins_total"]), f["last_truck_back"]])
@@ -204,6 +245,9 @@ def driver_message(conn: sqlite3.Connection, plan: dict, vehicle_id: str, lang: 
                    use_llm: bool = True) -> dict:
     f = plan_facts(plan)
     r = next(x for x in f["routes"] if x["vehicle_id"] == vehicle_id)
+    ev = evening_facts(conn, plan)
+    if ev and ev["planned"] and ev["status"] == "approved" and vehicle_id in ev["routes"]:
+        r = dict(r, evening=ev["routes"][vehicle_id])
     prompt = (f"Write a short message (at most 60 words) in {LANG_NAMES[lang]} for the crew of {r['truck']} from "
               "these facts:\n" + json.dumps(r, ensure_ascii=False))
     return _generate(conn, prompt, r, template_driver(r, lang), use_llm, [str(r["bins"]), r["start"], r["back_by"]])

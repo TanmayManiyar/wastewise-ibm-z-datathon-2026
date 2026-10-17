@@ -515,7 +515,9 @@ class SolveStats:
 
 
 def solve(prob: Problem, seconds: float = 8.0, max_iter: int = 5000, seed: int = 1,
-          start: Solution | None = None) -> tuple[Solution, SolveStats]:
+          start: Solution | None = None, patience: int | None = None) -> tuple[Solution, SolveStats]:
+    """patience: stop early once this many iterations in a row found no better plan
+    (seconds is then only a safety cap)."""
     rng = random.Random(seed)
     t_start = time.perf_counter()
     deadline = t_start + seconds
@@ -535,8 +537,11 @@ def solve(prob: Problem, seconds: float = 8.0, max_iter: int = 5000, seed: int =
     T0 = max(1.0, 0.01 * sum(c for c in cur.costs if c < prob.params.overtime_fixed))
     q_max = max(2, min(15, int(0.35 * prob.nb)))
     it = 0
-    ls_budget = 0.15 * seconds
+    last_better = 0
+    ls_budget = 0.15 * seconds if patience is None else min(3.0, 0.15 * seconds)
     while it < max_iter and time.perf_counter() < deadline - ls_budget:
+        if patience is not None and it - last_better > patience and it >= 2 * patience:
+            break
         it += 1
         frac = (time.perf_counter() - t_start) / max(1e-9, seconds - ls_budget)
         temp = T0 * (1 - min(frac, 1.0)) + 1e-3
@@ -554,6 +559,7 @@ def solve(prob: Problem, seconds: float = 8.0, max_iter: int = 5000, seed: int =
             cur = cand
             score = 33.0
             stats.improvements += 1
+            last_better = it
         elif cand.total < cur.total - 1e-6:
             cur = cand
             score = 9.0
