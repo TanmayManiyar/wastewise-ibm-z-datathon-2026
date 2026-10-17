@@ -27,6 +27,7 @@ scikit-learn, pyarrow, LightGBM, XGBoost or onnxruntime (checked with
 | pyarrow (needed by Streamlit) | 24.0.0 | Built from the Apache Arrow source release (SHA-512 verified) by `scripts/vm_build_pyarrow.sh`: Arrow C++ about 5 min, pyarrow about 2 min on 3 vCPUs |
 | IBM Snap ML | 1.17.2 | Native `manylinux_2_28_s390x` wheel from PyPI |
 | Streamlit, Plotly | 1.66.0, 7.1.0 | Pure-Python wheels |
+| LightGBM, XGBoost | 4.7.0, 3.4.1 | Built from source with `pip install --no-binary` (gcc 13, about 10 min together) |
 
 ## Telum accelerator
 
@@ -35,8 +36,6 @@ Snap ML picks its accelerator build (`libsnapmllocal3_zdnn`) only if
 mode. IBM Snap ML will not leverage NNPA."* Installing `libzdnn0` fixed this
 on this VM. `wastewise.platform_info` reports the machine type, the `nnpa`
 flag and the zDNN check, and the UI header shows the result.
-
-| LightGBM 4.7.0, XGBoost 3.4.1 | Built from source with `pip install --no-binary` (gcc 13, about 10 min together) |
 
 ## Telum benchmark (measured on the VM, 17 Oct 2026)
 
@@ -50,8 +49,9 @@ features) through IBM Snap ML 1.17.2 and writes `evidence/telum_<host>.json`.
 | Snap ML `compress_trees`, CPU | **0.93 ms** | **261 ms** |
 | Snap ML `zdnn_tensors`, Telum accelerator | 3.9 ms | 1031 ms |
 
-Size sweep (LightGBM, 100 000 rows, ms): depth 4/100 trees: native 127, Snap CPU 25,
-Telum 359. Depth 6/500: 771 / 196 / 937. Depth 8/500: 1013 / 274 / 1161.
+Size sweep (LightGBM, 100 000 rows, ms; timings vary by about 20 % between runs):
+depth 4/100 trees: native 127, Snap CPU 25, Telum 359. Depth 6/500: 771 / 196 / 937.
+Depth 8/500: 1013 / 274 / 1161. The latest run is in `evidence/telum_<host>.json`.
 
 **Result: on this z/VM guest, with zDNN 1.0.1 from Ubuntu, the accelerator path was
 slower than Snap ML on the CPU for every model size tried.** The gap narrows as
