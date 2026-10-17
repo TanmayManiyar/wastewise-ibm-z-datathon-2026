@@ -34,40 +34,59 @@ def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
         p = json.loads(c["parsed"] or "{}")
         cands = " or ".join(x["landmark"] for x in p.get("candidates", [])[:3]) or "place not recognised"
         lang = {"en": "English", "hi": "Hindi", "mr": "Marathi", "mixed": "mixed language"}.get(c["lang"], c["lang"])
+        test = bool(c["synthetic"] and (c["reporter"] or "").startswith("test"))
         out.append({"level": "critical" if p.get("urgent") else "warning", "kind": "complaint_new", "ts": c["ts"],
-                    "id": c["id"], "text": f"New complaint in {lang}: “{c['text']}”",
+                    "id": c["id"], "test": test, "text": ("TEST · " if test else "") + f"New complaint in {lang}: “{c['text']}”",
                     "action": f"Probably {cands} - confirm the bin below.",
                     "candidates": [x["bin_id"] for x in p.get("candidates", [])]})
-    ready = {c["id"]: c for c in complaints.ready_to_close(conn)}
-    for c in ready.values():
-        b = bins.get(c["bin_id"], {})
-        out.append({"level": "info", "kind": "complaint_ready", "ts": c["followup"]["ts"], "id": c["id"],
-                    "text": f"Complaint {complaints.ref(c['id'])} at {b.get('landmark', 'a bin')}: "
-                            f"{complaints.followup_text(c['followup'])} - ready to close",
-                    "action": "Check that the problem is gone (call the citizen if needed), then press Close. "
-                              "WasteWise never closes complaints by itself."})
-    for c in db.rows(conn, "SELECT * FROM complaints WHERE status='open' AND ts>=? ORDER BY ts DESC LIMIT 20",
-                     (now_ts - 86400,)):
-        if c["id"] in ready:
+    # Predictions: bins the forecaster expects to overflow before their next collection, merged with
+    # any open complaint about the same bin (one alert per bin).
+    from . import outlook_now
+    pred = outlook_now.predict(conn, now_ts)
+    open_c: dict[str, list[dict]] = {}
+    for c in db.rows(conn, "SELECT * FROM complaints WHERE status='open' AND bin_id IS NOT NULL ORDER BY ts DESC"):
+        if not complaints.followup(conn, c):          # collected since: ready to close (complaint register)
+            open_c.setdefault(c["bin_id"], []).append(c)
+    shown = set()
+    for bid, pr in sorted(pred["bins"].items(), key=lambda kv: (kv[1]["full_at"] or 0) if not kv[1]["full_now"] else -1):
+        cs = open_c.get(bid, [])
+        over = pr["overflow_min"]
+        if over < 30 and not cs:
             continue
-        urgent = c["problem"] in complaints.URGENT
-        b = bins.get(c["bin_id"], {})
-        out.append({"level": "critical" if urgent else "warning", "kind": "complaint", "ts": c["ts"], "id": c["id"],
-                    "text": f"Complaint {complaints.ref(c['id'])} at {b.get('landmark', 'an unconfirmed place')}: "
-                            f"{complaints.PROBLEM_WORDS.get(c['problem'], c['problem'])} (since {_hm(c['ts'])})",
-                    "action": "Send the nearest crew now - fire or dead animal is a health risk." if urgent else
-                              "Bin now shows as full; check its planned visit or Re-plan from now."})
+        b = pr["bin"]
+        urgent = any(c["problem"] in complaints.URGENT for c in cs)
+        test = any(c["synthetic"] and (c["reporter"] or "").startswith("test") for c in cs)
+        when_full = ("already full" if pr["full_now"] else
+                     f"predicted full at {_hm(pr['full_at'])}" if pr["full_at"] else "not predicted to fill up")
+        lines = [f"{b['landmark']}: {when_full} ({pr['source']}); {outlook_now.visit_text(pr['next_visit'])}"]
+        if over >= 30:
+            lines.append(f"expected to overflow for about {fmt.duration(over)} before then "
+                         f"({pr['p_full_at_visit'] * 100:.0f}% chance it is full when the truck arrives)")
+        for c in cs[:2]:
+            lines.append(f"complaint {complaints.ref(c['id'])} at {_hm(c['ts'])}: "
+                         f"{complaints.PROBLEM_WORDS.get(c['problem'], c['problem'] or 'other')}")
+        out.append({"level": "critical" if urgent or over >= 180 else "warning", "kind": "predicted", "bin_id": bid,
+                    "ts": (cs[0]["ts"] if cs else pr["full_at"] or now_ts), "test": test,
+                    "text": ("TEST · " if test else "") + " - ".join(lines),
+                    "action": ("Fire or dead animal: send the nearest crew now. " if urgent else "")
+                              + outlook_now.advice(conn, now_ts, pr["next_visit"])})
+        shown.add(bid)
     # Sensors.
     for bid, h in anomaly.sensor_health(conn, now_ts).items():
         if h["status"] != "ok":
             out.append({"level": "warning", "kind": "sensor", "ts": h["last_reading_ts"] or now_ts,
                         "text": f"The sensor at {bins[bid]['landmark']} is {h['status']}: {', '.join(REASON.get(x, x) for x in h['reasons'])}.",
                         "action": "Planning ignores this sensor; ask the supervisor to check the bin and the sensor."})
-    for s in anomaly.surges(conn, now_ts):
-        out.append({"level": "warning", "kind": "surge", "ts": s["since_ts"],
-                    "text": f"{s['landmark']} is filling unusually fast: it rose by {s['observed_rise']:.0f}% of the bin "
-                            f"in the last hours, {s['ratio']:.1f} times faster than normal.",
-                    "action": "Possible event or market rush - consider Re-plan from now or the What-if 'rush' scenario."})
+    for sg in outlook_now.model_surges(conn, now_ts):
+        pr = pred["bins"].get(sg["bin_id"], {})
+        full = ("it is full now" if pr.get("full_now") else
+                f"now predicted full at {_hm(pr['full_at'])}" if pr.get("full_at") else "")
+        out.append({"level": "warning", "kind": "surge", "ts": sg["since_ts"], "test": sg["test"],
+                    "text": ("TEST · " if sg["test"] else "")
+                            + f"{sg['landmark']} is filling faster than the forecaster predicted: it rose "
+                              f"{sg['observed']}% of the bin since {_hm(sg['since_ts'])}, the model expected "
+                              f"{sg['predicted']:.0f}% ({sg['ratio']:.1f} times more)" + (f"; {full}" if full else "") + ".",
+                    "action": "Possible event or market rush - " + outlook_now.advice(conn, now_ts, pr.get("next_visit"))})
     # Crew exceptions on today's plan.
     for r in progress.status_rows(conn, day, now_ts):
         if r["status"] in ("could_not_reach", "bin_missing", "overdue", "late"):
@@ -92,8 +111,9 @@ def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
                         "text": f"Road closed: {', '.join(streets)}"
                                 + (f" - {len(hit)} planned bin(s) cannot be reached" if hit else "")
                                 + (f" - {names} route(s) use it" if names else "") + ".",
-                        "action": "Use Re-plan from now during the shift (it avoids the closed road), or generate "
-                                  "the plan again before the shift."})
+                        "action": ("Re-plan from now - the new routes avoid the closed road."
+                                   if planner.in_shift(conn, now_ts) else
+                                   "Generate the plan again before the shift - the new routes avoid the closed road.")})
         off = fleet.out_of_service(conn, now_ts)
         for r in main_["routes"]:
             if r["vehicle_id"] in off and r["totals"]["bins"]:
@@ -101,18 +121,9 @@ def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
                             "text": f"{r['vehicle_name']} is out of service ({fleet.reason_text(off[r['vehicle_id']])}) "
                                     "but has a route today.",
                             "action": "Re-plan from now so the other trucks take its bins, or send the spare vehicle."})
-    # Evening round: recommended but not planned yet.
-    main = planner.current(conn, day)
-    if main and main["status"] == "approved" and planner.current(conn, day, round_="extra") is None:
-        from . import evening
-        a = evening.assess_cached(conn, main)
-        if a["candidates"]:
-            out.append({"level": "warning", "kind": "evening", "ts": now_ts,
-                        "text": f"{len(a['candidates'])} bin(s) will overflow again before tomorrow's round "
-                                f"(first one full at {_hm(a['candidates'][0]['full_at'])}).",
-                        "action": f"Plan the evening round under Today's plan - best time {_hm(a['suggested_start_ts'])}."})
     order = {"critical": 0, "warning": 1, "info": 2}
-    out.sort(key=lambda a: (order[a["level"]], -(a["ts"] or 0)))
+    # real alerts first, then test events; most serious first; predictions by time
+    out.sort(key=lambda a: (bool(a.get("test")), order[a["level"]], -(a["ts"] or 0) if a["kind"] != "predicted" else (a["ts"] or 0)))
     return out
 
 
@@ -188,6 +199,7 @@ class DemoDaemon(threading.Thread):
     def run(self) -> None:
         conn = db.connect()
         next_feed = 0.0
+        next_llm_check = 0.0
         try:
             from . import crews
             crews.seed_demo(conn)          # labelled demonstration crew list (only if none exists)
@@ -199,6 +211,11 @@ class DemoDaemon(threading.Thread):
                     self.last_check = time.time()
                     if roll_forward_if_old(conn):
                         self.last_roll = db.now()
+                if time.time() >= next_llm_check:
+                    next_llm_check = time.time() + 300
+                    from . import llm
+                    if llm.selfcheck_needed(conn):       # new or changed model: test it before offering it
+                        llm.selfcheck(conn)
                 if feed_on(conn) and time.time() >= next_feed:
                     next_feed = time.time() + FEED_EVERY_S
                     self.last_count = feed_step(conn)

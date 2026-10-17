@@ -28,6 +28,13 @@ def main() -> None:
     print("Training forecaster on the Sanpada (synthetic) history ...")
     out["forecaster"] = forecast.train_and_register(conn, "train_models.py")
     print(json.dumps(out["forecaster"]["decision"]))
+    print("Live-style check (forecasts made with data cut at the forecast time) ...")
+    cur = forecast.promoted(conn)
+    bounds = json.loads(db.get_meta(conn, "forecast_test_window"))
+    end = int(conn.execute("SELECT MAX(ts) FROM readings").fetchone()[0])
+    out["forecaster_live_check"] = forecast.live_backtest(conn, forecast._load(cur["path"]), cur["metrics"]["best_model"],
+                                                          bounds["test_start"], end)
+    print(json.dumps({k: v for k, v in out["forecaster_live_check"].items() if k != "by_hours_ahead"}))
     print("Evaluating fault detection against synthetic fault labels ...")
     out["anomaly"] = anomaly.evaluate_synthetic(conn)
     if not a.no_mildura:

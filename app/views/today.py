@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from datetime import datetime
+from datetime import date, datetime
 
 from wastewise import config, crews, db, evening, fmt, jobs, pdfs, planner, progress, proof, roads
 
@@ -576,7 +576,8 @@ def page() -> None:
         plan_tab(day)
     from views import progress, alerts_view, briefing, crew
     with tabs[1]:
-        progress.tab(now_day)
+        from wastewise import progress as wprogress
+        progress.tab(date.fromisoformat(wprogress.progress_day(c)), now_day)
     with tabs[2]:
         alerts_view.tab(now_day)
     with tabs[3]:

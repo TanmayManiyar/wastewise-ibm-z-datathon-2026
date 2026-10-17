@@ -100,17 +100,33 @@ def outlook(conn: sqlite3.Connection, now_ts: int, days: int = 7) -> list[dict]:
         used = [r["totals"]["landfill_trips"] for r in body["routes"] if r["totals"]["bins"]]
         trips = max(1.0, float(np.mean(used))) if used else trips
     fleet = sum(v["capacity_l"] for v in db.vehicles(conn)) * 0.95 * trips
+    # Sensor bins: the ML forecaster's next 24 hours (run on the Telum / CPU engine chosen for this machine),
+    # carried to the following days with each bin's weekly pattern. Other bins: the learned weekly pattern.
+    ml_scale = {}
+    try:
+        ml = forecast.predict_rates(conn, now_ts, 24, [b for b in bins if b["has_sensor"]], {}, job="7-day outlook")
+    except Exception:
+        ml = None
+    t1 = _day(now_ts) + timedelta(days=1)
+    if ml:
+        for b in bins:
+            r = ml["rates"].get(b["id"])
+            base = float(prof[b["id"]][t1.weekday()].sum())
+            if r is not None and base > 0 and b["has_sensor"]:
+                ml_scale[b["id"]] = float(np.clip(np.sum(r[:24]) / base, 0.5, 2.0))
     out = []
     today = _day(now_ts)
     for k in range(1, days + 1):
         d = today + timedelta(days=k)
         dow = d.weekday()
-        litres = sum(float(prof[b["id"]][dow].sum()) * b["capacity_l"] / 100 for b in bins)
+        litres = sum(float(prof[b["id"]][dow].sum()) * ml_scale.get(b["id"], 1.0) * b["capacity_l"] / 100
+                     for b in bins)
         f = calendar_in.festival_on(d)
         uplift = fe.get(f[0], 1.0) if f else 1.0
         out.append({"date": d.isoformat(), "expected_litres": round(litres * uplift),
                     "festival": f[0] if f else None, "uplift": uplift, "fleet_capacity_litres": round(fleet),
-                    "over_capacity": litres * uplift > fleet})
+                    "over_capacity": litres * uplift > fleet,
+                    "source": "ML forecaster for sensor bins + weekly pattern" if ml_scale else "weekly pattern"})
     return out
 
 

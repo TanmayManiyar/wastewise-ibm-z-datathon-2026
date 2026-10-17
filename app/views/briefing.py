@@ -31,7 +31,6 @@ def tab(day) -> None:
     st.caption("What this is for: a short briefing to read out at the morning meeting, and a ready-made message for "
                "each truck's crew in their language - for crews who do not use the app. Every figure comes "
                "straight from the plan.")
-    stt = llm.status(c)
 
     st.markdown(f"#### Morning briefing · {today_label(p['plan_date'])}")
     key = f"brief_{p['id']}"
@@ -44,7 +43,7 @@ def tab(day) -> None:
     a, b, _ = st.columns([1, 1.4, 2])
     with a:
         _share(res["text"], key)
-    if stt["ok"] and b.button("Let Granite reword it", key="brief_btn"):
+    if llm.usable(c, "briefing") and b.button("Let Granite reword it", key="brief_btn"):
         with st.spinner("Writing ..."):
             st.session_state[key] = llm.briefing(c, p, use_llm=True)
         audit.log(c, user()["username"], "briefing_written", {"plan_id": p["id"], "source": st.session_state[key]["source"]})
@@ -66,7 +65,7 @@ def tab(day) -> None:
     a, b, _ = st.columns([1, 1.4, 2])
     with a:
         _share(msg["text"], mkey)
-    if stt["ok"] and b.button("Let Granite reword it", key="dm_btn"):
+    if llm.usable(c, f"driver_{lang}") and b.button("Let Granite reword it", key="dm_btn"):
         with st.spinner("Writing ..."):
             st.session_state[mkey] = llm.driver_message(c, p, vid, lang, use_llm=True)
         audit.log(c, user()["username"], "driver_message_written",

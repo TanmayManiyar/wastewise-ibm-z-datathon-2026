@@ -21,13 +21,22 @@ def _proof_pill(r: dict):
     return (text, colour) if text else None
 
 
-def tab(day) -> None:
+def tab(day, today=None) -> None:
+    """day: the plan day followed (today's, or the next shift's approved plan); today: calendar day for the
+    crew activity log."""
+    from wastewise import fmt
     c = conn()
+    today = today or day
     d = day.isoformat()
     rows = progress.status_rows(c, d, db.now())
     if not rows:
-        st.info("Progress appears here once a plan for the day is approved.")
+        st.info("No plan for today or the next shift has been approved yet, so there is nothing to compare with. "
+                "What the crews recorded today is listed below.")
+        activity(today)
         return
+    if day != today:
+        st.info(f"Following the approved plan for **{fmt.day_name(d)}** (the next shift) - crews can already see "
+                "and record it on their phones.", icon=":material/event:")
     summ = progress.summary(rows)
     cols = st.columns(len(summ))
     for col, (veh, s) in zip(cols, summ.items()):
@@ -39,12 +48,8 @@ def tab(day) -> None:
             st.caption(", ".join(b for b in bits if b) or "No problems so far")
     ex = [r for r in rows if r["status"] in ("late", "could_not_reach", "bin_missing", "overdue", "missed")]
     if ex:
-        st.subheader(f"Exceptions ({len(ex)})")
-        for r in ex:
-            fn = st.error if r["status"] in ("could_not_reach", "bin_missing", "missed") else st.warning
-            fn(f"**{r['landmark']}** ({r['vehicle_name']}, planned {hhmm(r['planned_ts'])}): "
-               f"{STATUS_LABEL[r['status']]}" + (f", {r['delay_min']} min after the planned time" if r["delay_min"] else "")
-               + f"  \nWhat to do: {r['action']}")
+        st.caption(f"{len(ex)} stop(s) need attention (late, not reached, missing or overdue) - they are marked in "
+                   "the table below; what to do is under **Live alerts**.")
     def late_text(r):
         if r["delay_min"] is None:
             return ""
@@ -105,3 +110,33 @@ def tab(day) -> None:
                                          float(fill), ts=ts, note="entered from paper route sheet")
                     mark_seen()
                     st.success(f"Saved {r['landmark']}: {STATUS_LABEL[outcome]}.")
+
+    activity(today)
+
+
+def activity(day) -> None:
+    """Everything the crews recorded today, by time - whichever route it belongs to (or none)."""
+    c = conn()
+    rows = progress.day_activity(c, day.isoformat())
+    st.subheader("What the crews did today")
+    if not rows:
+        st.caption("Nothing recorded yet today.")
+        return
+    real = st.toggle("Only records made by crews and office staff (hide the synthetic routine history)",
+                     value=any(not r["synthetic"] for r in rows), key="act_real")
+    show = [r for r in rows if not (real and r["synthetic"])]
+    summ = progress.activity_summary(show)
+    if summ:
+        cols = st.columns(len(summ))
+        for col, (truck, s_) in zip(cols, sorted(summ.items())):
+            with col.container(border=True):
+                st.markdown(f"**{truck}**")
+                st.caption(f"{s_['collected']} collected · {s_['problems']} problem(s) · {s_['unloads']} unload(s)  \n"
+                           f"last activity {hhmm(s_['last_ts'])}"
+                           + (f"  \n{', '.join(sorted(s_['people']))}" if s_["people"] else ""))
+    table([{"time": hhmm(r["ts"]), "truck": r["truck"], "what": r["what"], "place": r["place"],
+            "fill": f"{r['fill']:.0f}%" if r["fill"] is not None else "", "proof": r["proof"], "by": r["by"],
+            "route": r["route"]} for r in reversed(show)],
+          [Col("time", "Time"), Col("truck", "Truck"), Col("what", "What"), Col("place", "Place"),
+           Col("fill", "How full"), Col("proof", "Proof of service", "pill"), Col("by", "By"),
+           Col("route", "Route")], max_height=480)

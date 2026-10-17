@@ -58,7 +58,8 @@ def assess(conn: sqlite3.Connection, plan: dict, min_overflow_min: float = 60.0)
     _, morning_end = planner.shift_window(s, day)
     next_start, _ = planner.shift_window(s, day + timedelta(days=1))
     start = int(plan["start_ts"])
-    st, rates, _, src = planner._rates(conn, start, 48, list(bins.values()), set(plan.get("bad_sensors", [])))
+    st, rates, _, src = planner._rates(conn, start, 48, list(bins.values()), set(plan.get("bad_sensors", [])),
+                                       job="evening assessment")
     visits = {stp["bin_id"]: stp["arrive_ts"] for r in plan["routes"] for stp in r["stops"] if stp["kind"] == "bin"}
     hh, mm = map(int, s.get("extra_latest_start", "20:00").split(":"))
     latest = int(datetime(day.year, day.month, day.day, hh, mm, tzinfo=config.IST).timestamp())

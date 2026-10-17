@@ -15,10 +15,31 @@ def tab(day) -> None:
     @st.fragment(run_every=10)
     def _list():
         items = live.alerts(c)
-        st.caption(f"Updated {hhmm(db.now())} · refreshes by itself every 10 seconds · {len(items)} alert(s)")
+        pred = [a for a in items if a["kind"] == "predicted"]
+        rest = [a for a in items if a["kind"] != "predicted"]
+        st.caption(f"Updated {hhmm(db.now())} · refreshes by itself every 10 seconds")
         if not items:
-            st.success("All quiet.", icon=":material/check_circle:")
-        for a in items:
+            st.success("All quiet - no bin is predicted to overflow before its next collection.",
+                       icon=":material/check_circle:")
+        if pred:
+            from wastewise import outlook_now
+            eng = outlook_now.predict(c)["engine"] or "learned pattern (no trained forecaster yet)"
+            st.markdown(f"##### Predicted to overflow before the next collection ({len(pred)})")
+            st.caption(f"From the forecaster ({eng}), compared with each bin's next planned collection. "
+                       "Earliest first. Bins without a sensor use their learned pattern and say so.")
+
+            def show(a):
+                fn = st.error if a["level"] == "critical" else st.warning
+                fn(f"**{a['text']}**  \nWhat to do: {a['action']}", icon=LEVEL_ICON[a["level"]])
+            for a in pred[:5]:
+                show(a)
+            if len(pred) > 5:
+                with st.expander(f"{len(pred) - 5} more predicted"):
+                    for a in pred[5:]:
+                        show(a)
+        if rest:
+            st.markdown(f"##### Happening now ({len(rest)})")
+        for a in rest:
             fn = {"critical": st.error, "warning": st.warning}.get(a["level"], st.info)
             fn(f"**{hhmm(a['ts'])} · {a['text']}**  \nWhat to do: {a['action']}", icon=LEVEL_ICON[a["level"]])
             if a["kind"] == "complaint_ready" and can("complaints"):

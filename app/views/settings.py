@@ -402,16 +402,25 @@ def ai_tab() -> None:
             cache = forecast._inference_model(c)
             eng = cache.get("engine") if cache else None
             if eng:
-                t_ = eng.timings_ms or {}
-                st.write(f"In use: **{eng.device}**" + (
-                    f" - measured on this server: CPU {t_['cpu']:.2f} ms, accelerator {t_['accelerator']:.2f} ms "
-                    f"for one planning run, so the faster one is used." if t_ else ""))
-                st.session_state._engine_label = "trees on " + ("Telum" if eng.tree_format == "zdnn_tensors" else "CPU")
+                st.write(f"In use: **{eng.device}**" + (f" for planning, **{eng.bulk.device}** for bulk forecasts"
+                                                          if eng.bulk else "") + f". {eng.summary().capitalize()}.")
+                if eng.timings_ms and eng.timings_ms.get("accelerator"):
+                    tm = eng.timings_ms
+                    table([{"batch": f"{int(n):,} rows" + (" (one planning run)" if n == "720" else " (bulk job)"),
+                            "cpu": f"{tm['cpu'][n]:.2f} ms", "acc": f"{tm['accelerator'][n]:.2f} ms"}
+                           for n in tm["cpu"]],
+                          [Col("batch", "Measured when the model loaded"), Col("cpu", "CPU (Snap ML)"),
+                           Col("acc", "Telum accelerator (Snap ML, zDNN)")])
             else:
                 st.write(f"In use: native {cur['metrics'].get('gbt_library')} on the CPU"
                          + ("" if telum.snapml_version() else " (IBM Snap ML not installed here)"))
         except Exception as exc:
             st.warning(f"Could not load the inference engine: {exc}")
+    if forecast.RUNS:
+        table([{"job": j, "dev": r["device"], "rows": f"{r['rows']:,}", "ms": f"{r['ms']:.1f} ms", "at": when(r["ts"])}
+               for j, r in sorted(forecast.RUNS.items())],
+              [Col("job", "Forecast job"), Col("dev", "Ran on"), Col("rows", "Rows"), Col("ms", "Time"),
+               Col("at", "When")])
     models = db.rows(c, "SELECT id, created_at, name, promoted, metrics FROM models WHERE kind='forecaster' ORDER BY id DESC")
     if models:
         rows = []
@@ -439,6 +448,31 @@ def ai_tab() -> None:
     st.write(("**Running on this server**" + (f" ({model_name})" if model_name else "") +
               ". Every figure it writes is checked against the plan.") if stt["ok"] else
              "**Not running** - briefings and driver messages use the built-in templates (always correct).")
+    sc = llm.selfcheck_result(c)
+    if stt["ok"]:
+        st.markdown("**Self-check** - before WasteWise offers Granite for a task, it gives it one test prompt for "
+                    "that task and checks every figure in the answer. Only tasks that pass get a "
+                    "'Let Granite reword it' button; the others keep the templates.")
+        if sc and sc.get("model") == stt.get("model") and sc.get("kinds"):
+            names = {"briefing": "Morning briefing (English)", "driver_en": "Crew message (English)",
+                     "driver_hi": "Crew message (Hindi)", "driver_mr": "Crew message (Marathi)"}
+            table([{"task": names.get(k, k), "res": ("Passed", "green") if v["ok"] else ("Not offered", "grey"),
+                    "why": "" if v["ok"] else (v.get("why") or "").replace("Granite's text ", "its text ")
+                                                    .replace(" - showing the checked template instead", ""),
+                    "secs": f"{v['seconds']:.0f} s"} for k, v in sc["kinds"].items()],
+                  [Col("task", "Task"), Col("res", "", "pill"), Col("why", "Why not"), Col("secs", "Time taken")])
+            st.caption(f"Checked {when(sc['ts'])}. A base (not instruction-tuned) model usually fails: it does not "
+                       "follow instructions, so its figures do not match the plan.")
+            with st.expander("What the model wrote in the test"):
+                for k, v in sc["kinds"].items():
+                    st.markdown(f"**{k}**")
+                    st.text(v["sample"])
+        else:
+            st.caption("The self-check runs by itself a few minutes after the model starts.")
+        if can("settings") and st.button("Run the self-check now", help="About 1-4 minutes on this server."):
+            with st.spinner("Testing the language model ..."):
+                llm.selfcheck(c)
+            st.rerun()
     if can("settings"):
         with st.form("llm"):
             url = st.text_input("Local llama.cpp server", s.get("llm_url", llm.DEFAULT_URL))

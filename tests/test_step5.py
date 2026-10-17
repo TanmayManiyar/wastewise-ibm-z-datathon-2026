@@ -48,7 +48,7 @@ def test_live_alert_when_approved_route_meets_a_new_closure(conn):
         pytest.skip("bin not in the plan")
     closures.add(conn, street, NOW_TS + 86400, "", "supervisor", from_ts=NOW_TS - 60)
     al = [a for a in live.alerts(conn, NOW_TS + 60) if a["kind"] == "closure"]
-    assert al and street in al[0]["text"] and "Re-plan" in al[0]["action"]
+    assert al and street in al[0]["text"] and "avoid the closed road" in al[0]["action"]
 
 
 def test_landfill_gate_hours_and_queue(conn):

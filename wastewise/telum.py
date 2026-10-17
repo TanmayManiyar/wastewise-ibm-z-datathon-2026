@@ -24,15 +24,38 @@ import numpy as np
 from . import platform_info
 
 
+SMALL, LARGE = 720, 20000      # one planning run (30 bins x 24 h) / a bulk job (re-test, outlook, what-if sets)
+
+
 @dataclass
 class Engine:
     device: str
     tree_format: str
     model: object
-    timings_ms: dict | None = None
+    timings_ms: dict | None = None      # {"cpu": {"720": ms, "20000": ms}, "accelerator": {...}}
+    bulk: "Engine | None" = None        # used for large batches when it measured faster there
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.bulk is not None and len(X) >= (SMALL + LARGE) // 2:
+            return self.bulk.predict(X)
         return np.asarray(self.model.predict(np.ascontiguousarray(X, dtype=np.float32)))
+
+    def device_for(self, rows: int) -> str:
+        return self.bulk.device if self.bulk is not None and rows >= (SMALL + LARGE) // 2 else self.device
+
+    def summary(self) -> str:
+        """Plain words for the header and Settings: what runs where, with the measured times."""
+        t = self.timings_ms or {}
+        if not t.get("accelerator"):
+            return f"forecast trees on {self.device}"
+        c, a = t["cpu"], t["accelerator"]
+        small = "Telum" if a[str(SMALL)] < c[str(SMALL)] else "CPU"
+        large = "Telum" if a[str(LARGE)] < c[str(LARGE)] else "CPU"
+        if small == large == "CPU":
+            return (f"Telum tested - CPU faster for these models (planning {c[str(SMALL)]:.1f} vs "
+                    f"{a[str(SMALL)]:.1f} ms, bulk {c[str(LARGE)]:.0f} vs {a[str(LARGE)]:.0f} ms)")
+        return (f"planning on {small} ({min(c[str(SMALL)], a[str(SMALL)]):.1f} ms), bulk forecasts on {large} "
+                f"({min(c[str(LARGE)], a[str(LARGE)]):.0f} ms) - measured here")
 
 
 def _time(fn, X, repeats=3) -> float:
@@ -91,16 +114,23 @@ def engine_for(model, model_dir: Path, mode: str = "auto") -> Engine | None:
     if mode == "accelerator" and acc is not None:
         return acc
     if mode == "auto" and acc is not None and cpu is not None:
-        n = len(getattr(model, "feature_names", None) or []) or 18
-        X = np.random.default_rng(0).uniform(0, 50, (720, n)).astype(np.float32)
-        t = {"cpu": _time(cpu.predict, X), "accelerator": _time(acc.predict, X)}
-        best = acc if t["accelerator"] < t["cpu"] else cpu
-        best.timings_ms = {k: round(v, 3) for k, v in t.items()}
-        return best
+        from .forecast import FEATURES
+        rng = np.random.default_rng(0)
+        t = {"cpu": {}, "accelerator": {}}
+        for n in (SMALL, LARGE):
+            X = rng.uniform(0, 50, (n, len(FEATURES))).astype(np.float32)
+            t["cpu"][str(n)] = round(_time(cpu.predict, X), 3)
+            t["accelerator"][str(n)] = round(_time(acc.predict, X), 3)
+        small = acc if t["accelerator"][str(SMALL)] < t["cpu"][str(SMALL)] else cpu
+        large = acc if t["accelerator"][str(LARGE)] < t["cpu"][str(LARGE)] else cpu
+        small.timings_ms = t
+        if large is not small:
+            small.bulk = large
+        return small
     return cpu or acc
 
 
-def benchmark(model, model_dir: Path, X: np.ndarray, repeats: int = 7, batch_sizes=(720, 20000)) -> dict:
+def benchmark(model, model_dir: Path, X: np.ndarray, repeats: int = 7, batch_sizes=(720, 20000, 100000)) -> dict:
     """Time the same boosted trees on: native library (CPU), Snap ML CPU, Snap ML accelerator."""
     from .forecast import _fill_nan
     Xf = np.ascontiguousarray(_fill_nan(X), dtype=np.float32)

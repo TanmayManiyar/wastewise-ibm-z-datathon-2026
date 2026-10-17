@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import anomaly, calendar_in, config, db
+from . import anomaly, calendar_in, config, db, state
 
 WINDOW = 3
 TRAIN_LEADS = list(range(0, 24, 3))
@@ -120,12 +120,16 @@ def feature_rows(s: Series, origins: np.ndarray, leads: list[int], with_target: 
     """Rows for (origin, lead) pairs. Returns X (n, F), y (n,) or None, origin hour idx, lead."""
     inc3 = window_rates(s)
     H = len(s.f)
-    # history aggregates aligned to "window start" s = o + k
+    # history aggregates aligned to "window start" s = o + k. Forecast windows can start after the end of the
+    # data (o + k >= H): pad so their "same hour on earlier days" values come from those earlier days
+    # (which are known) instead of being clamped to the last hour.
+    pad = max(leads) + WINDOW + 1
+    inc3x = np.r_[inc3, np.full(pad, np.nan)]
     same7 = {}
     for k in sorted(set(leads)):
         j0 = 1 if k + WINDOW <= 24 else 2
-        same7[k] = _nanmean_stack([_shift(inc3, 24 * j) for j in range(j0, j0 + 7)])
-    same4w = _nanmean_stack([_shift(inc3, 168 * j) for j in range(1, 5)])
+        same7[k] = _nanmean_stack([_shift(inc3x, 24 * j) for j in range(j0, j0 + 7)])
+    same4w = _nanmean_stack([_shift(inc3x, 168 * j) for j in range(1, 5)])
     cs = np.r_[0.0, np.nancumsum(inc3)]
     cn = np.r_[0, np.cumsum(~np.isnan(inc3))]
 
@@ -174,7 +178,7 @@ def feature_rows(s: Series, origins: np.ndarray, leads: list[int], with_target: 
             cal = np.zeros((len(o), 4))
         X = np.column_stack([
             np.full(len(o), k), hour, dow, (dow >= 5).astype(int), cal[:, 0], cal[:, 1], cal[:, 2], cal[:, 3],
-            same7[k][np.minimum(st, H - 1)], same4w[np.minimum(st, H - 1)],
+            same7[k][st], same4w[st],
             win_mean(o - 168, o - WINDOW + 1), win_mean(o - 24, o - WINDOW + 1), win_mean(o - 6, o - WINDOW + 1),
             fill_now[o], np.minimum(o - last_coll[o], 72),
             np.full(len(o), s.static.get("capacity_l", 0)), np.full(len(o), s.static.get("site_code", 0)),
@@ -447,8 +451,26 @@ def _inference_model(conn: sqlite3.Connection):
     return _CACHE
 
 
+RUNS: dict[str, dict] = {}       # last inference per job: device, rows, ms (shown in the header / Settings)
+
+
+def predict_with_engine(conn: sqlite3.Connection, X: np.ndarray, job: str) -> tuple[dict, dict] | None:
+    """All forecaster predictions (planning, what-if, evening round, 7-day outlook, re-test) go through
+    here, so the boosted trees run on the engine chosen for this machine and batch size."""
+    c = _inference_model(conn)
+    if c is None:
+        return None
+    model, engine = c["model"], c["engine"]
+    t = time.perf_counter()
+    parts = model.predict_parts(X, gbt_predict=engine.predict if engine else None)
+    ms = (time.perf_counter() - t) * 1000
+    device = engine.device_for(len(X)) if engine else f"native {model.gbt_lib} on the CPU"
+    RUNS[job] = {"device": device, "rows": int(len(X)), "ms": round(ms, 2), "ts": int(time.time())}
+    return parts, RUNS[job]
+
+
 def predict_rates(conn: sqlite3.Connection, at_ts: int, hours: int, bins: list[dict], states: dict,
-                  fallback: dict[str, np.ndarray] | None = None) -> dict | None:
+                  fallback: dict[str, np.ndarray] | None = None, job: str = "planning") -> dict | None:
     """Hourly %/h for the next `hours` hours for each bin. Sensor bins use the promoted
     model; other bins (and faulty sensors) keep the fallback profile rates."""
     c = _inference_model(conn)
@@ -468,9 +490,8 @@ def predict_rates(conn: sqlite3.Connection, at_ts: int, hours: int, bins: list[d
     if not Xs:
         return None
     X = np.vstack(Xs)
-    t = time.perf_counter()
-    parts = model.predict_parts(X, gbt_predict=engine.predict if engine else None)
-    infer_ms = (time.perf_counter() - t) * 1000
+    parts, run = predict_with_engine(conn, X, job)
+    infer_ms = run["ms"]
     pred = np.clip(parts[row["metrics"]["best_model"]], 0.0, None)
     for i, key in enumerate(owners):
         r24 = pred[i * 24:(i + 1) * 24]
@@ -478,7 +499,7 @@ def predict_rates(conn: sqlite3.Connection, at_ts: int, hours: int, bins: list[d
         rates[key] = rr
     src = f"ML forecaster ({row['metrics']['best_model']}, model #{row['id']})"
     if engine:
-        src += f" - tree inference on {engine.device}"
+        src += f" - tree inference on {engine.device_for(len(X))}"
     return {"rates": rates, "source": src, "inference_ms": round(infer_ms, 2), "rows": len(X)}
 
 
@@ -556,7 +577,8 @@ def evaluate_promoted(conn: sqlite3.Connection, history_days: int = 180) -> dict
         return None
     Xt, yt, kt = X[te], y[te], keys[te]
     best = cur["metrics"]["best_model"]
-    pred = model.predict_parts(Xt)[best]
+    via = predict_with_engine(conn, Xt, "re-test")
+    pred = (via[0] if via else model.predict_parts(Xt))[best]
     base = baselines(Xt)
     base_name = min(base, key=lambda n: np.abs(base[n] - yt).mean())
     err = np.abs(pred - yt) * WINDOW
@@ -581,3 +603,37 @@ def evaluate_promoted(conn: sqlite3.Connection, history_days: int = 180) -> dict
             "baseline": base_name, "baseline_mae": round(float(berr.mean()), 2),
             "improvement_pct": round((1 - err.mean() / berr.mean()) * 100, 1),
             "share_within_5_points": round(within5, 3), "by_lead": by_lead, "by_site_type": by_type}
+
+
+def live_backtest(conn: sqlite3.Connection, model: "Forecaster", best: str, start_ts: int, end_ts: int,
+                  every_h: int = 12, leads: list[int] = TRAIN_LEADS) -> dict:
+    """Forecasts made exactly as the app makes them - the series cut at the forecast time, windows in the
+    future - scored against what then happened, next to the learned weekly pattern. (The locked-test score
+    uses rows built from the full history; this checks the live path gives the same quality.)"""
+    bins = [b for b in db.bins(conn) if b["has_sensor"]]
+    full = {s.key: s for s in sanpada_series(conn, start_ts - 30 * 86400, end_ts, bins)}
+    err = {"model": [], "learned_pattern": []}
+    by_lead: dict[int, list[float]] = {k: [] for k in leads}
+    for o_ts in range(start_ts - start_ts % 3600, end_ts - 30 * 3600, every_h * 3600):
+        prof = state.rate_profiles(conn, o_ts)
+        for s in sanpada_series(conn, o_ts - 29 * 86400, o_ts, bins):
+            X, _, _, kk = feature_rows(s, np.array([len(s.f) - 1]), leads, with_target=False)
+            fs = full.get(s.key)
+            if not len(X) or fs is None:
+                continue
+            inc = window_rates(fs)
+            base = int((o_ts - fs.start_ts) // 3600)
+            p = model.predict_parts(X)[best]
+            for j, k in enumerate(kk):
+                h = base + int(k)
+                if h >= len(inc) or np.isnan(inc[h]):
+                    continue
+                pp = state.growth_between(prof[s.key], o_ts + int(k) * 3600, o_ts + (int(k) + WINDOW) * 3600) / WINDOW
+                err["model"].append(abs(p[j] - inc[h]) * WINDOW)
+                err["learned_pattern"].append(abs(pp - inc[h]) * WINDOW)
+                by_lead[int(k)].append(abs(p[j] - inc[h]) * WINDOW)
+    return {"label": "forecasts made as the app makes them (data cut at the forecast time); fill points per 3 h",
+            "forecasts": len(err["model"]),
+            "model_mae": round(float(np.mean(err["model"])), 3) if err["model"] else None,
+            "learned_pattern_mae": round(float(np.mean(err["learned_pattern"])), 3) if err["model"] else None,
+            "by_hours_ahead": {k: round(float(np.mean(v)), 2) for k, v in by_lead.items() if v}}

@@ -173,6 +173,16 @@ def route_changes(conn: sqlite3.Connection, old: dict | None, new: dict, vehicle
     return {"added": added, "removed": removed, "stops": len(after)}
 
 
+def progress_day(conn: sqlite3.Connection, now_ts: int | None = None) -> str:
+    """The plan day Progress follows: today's if a plan for today was approved, otherwise the next shift's
+    approved plan (crews see and work on it from the evening before), otherwise today."""
+    today = planner.today(now_ts).isoformat()
+    if day_plans(conn, today):
+        return today
+    nxt = planner.plan_day(conn, now_ts).isoformat()
+    return nxt if nxt != today and day_plans(conn, nxt) else today
+
+
 def crew_day(conn: sqlite3.Connection, vehicle_id: str, now_ts: int | None = None) -> str:
     """Which day's route the crew phone shows: today's while it has stops left, otherwise the next
     shift's approved route (for example tomorrow's, in the evening)."""
@@ -246,3 +256,50 @@ def record_crew(conn: sqlite3.Connection, plan: dict, vehicle_id: str, kind: str
         audit.log(conn, user, f"crew_{kind}", {"plan_id": plan["id"], "vehicle": vehicle_id, "bin_id": bin_id,
                                                "fill": fill, "note": note, "person": person,
                                                "dist_m": dist, "photo": bool(photo)})
+
+
+ACTIVITY_WORDS = {"collected": "Collected", "could_not_reach": "Could not reach", "bin_missing": "Bin missing",
+                  "landfill_unload": "Unloaded at the landfill", "position": "Position sent"}
+
+
+def day_activity(conn: sqlite3.Connection, day: str) -> list[dict]:
+    """Everything the crews recorded on this calendar day (IST), whatever route it belongs to - today's,
+    the next shift's (tapped in the evening), the evening round, or none (routine / paper sheet)."""
+    from datetime import date, datetime, timedelta
+
+    from . import config, fmt, proof
+    d = date.fromisoformat(day)
+    t0 = int(datetime(d.year, d.month, d.day, tzinfo=config.IST).timestamp())
+    bins = {b["id"]: b for b in db.bins(conn, active_only=False)}
+    trucks = {v["id"]: v["name"] for v in db.vehicles(conn, active_only=False)}
+    plans = {r["id"]: r for r in db.rows(conn, "SELECT id, plan_date, kind FROM plans")}
+    out = []
+    for e in db.rows(conn, "SELECT * FROM events WHERE ts>=? AND ts<? AND kind IN ('collected','could_not_reach',"
+                           "'bin_missing','landfill_unload','position') ORDER BY ts", (t0, t0 + 86400)):
+        p = plans.get(e["plan_id"])
+        route = ("routine round (synthetic)" if e["synthetic"] else "not on a plan (paper sheet / office)") if not p else \
+                ("evening round" if p["kind"] == "extra" else "re-plan" if p["kind"] == "replan" else "plan") + \
+                ("" if p["plan_date"] == day else f" for {fmt.day_name(p['plan_date'])}")
+        colour, text = proof.verdict(e)
+        b = bins.get(e["bin_id"]) if e["bin_id"] else None
+        out.append({"ts": e["ts"], "vehicle_id": e["vehicle_id"], "truck": trucks.get(e["vehicle_id"], e["vehicle_id"] or "-"),
+                    "kind": e["kind"], "what": ACTIVITY_WORDS.get(e["kind"], e["kind"]),
+                    "place": b["landmark"] if b else ("Turbhe landfill" if e["kind"] == "landfill_unload" else ""),
+                    "fill": e["fill_before"], "by": e.get("person") or e["user"] or "", "route": route,
+                    "proof": (text, colour) if text else None, "photo": e.get("photo"),
+                    "synthetic": bool(e["synthetic"]), "late_min": round((e["ts"] - e["planned_ts"]) / 60)
+                    if e.get("planned_ts") else None})
+    return out
+
+
+def activity_summary(rows: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for r in rows:
+        s = out.setdefault(r["truck"], {"collected": 0, "problems": 0, "unloads": 0, "last_ts": None, "people": set()})
+        s["collected"] += r["kind"] == "collected"
+        s["problems"] += r["kind"] in ("could_not_reach", "bin_missing")
+        s["unloads"] += r["kind"] == "landfill_unload"
+        s["last_ts"] = r["ts"]
+        if r["by"] and not r["synthetic"]:
+            s["people"].add(r["by"])
+    return out

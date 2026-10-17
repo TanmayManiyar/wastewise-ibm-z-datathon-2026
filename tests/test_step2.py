@@ -36,7 +36,9 @@ def test_collection_makes_a_complaint_ready_to_close_but_never_closes_it(conn):
     assert "ready to close" not in complaints.followup_text(f) and "by Truck 2" in complaints.followup_text(f)
     assert cid in [x["id"] for x in complaints.ready_to_close(conn)]
     alerts = live.alerts(conn, now_ts=NOW_TS + 3700)
-    assert any(a["kind"] == "complaint_ready" and a["id"] == cid for a in alerts)
+    # ready-to-close complaints are listed in the complaint register, not repeated in Live alerts
+    assert not any(a["kind"] == "complaint_ready" for a in alerts)
+    assert not any(a["kind"] == "predicted" and f"complaint {complaints.ref(cid)}" in a["text"] for a in alerts)
     for who in ("system", "synthetic", "api:sensor", ""):
         with pytest.raises(ValueError):
             complaints.resolve(conn, cid, who)

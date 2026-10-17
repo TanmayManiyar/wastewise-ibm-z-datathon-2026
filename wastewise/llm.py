@@ -266,3 +266,69 @@ def complaint_place_words(conn: sqlite3.Connection, text: str) -> list[str]:
     except ValueError:
         return []
     return [str(w)[:60] for w in words if isinstance(w, str)][:5]
+
+
+# ------------------------------------------------------------------ start-up self-check
+SAMPLE_FACTS = {
+    "date": "2026-10-18", "plan_id": 0, "status": "approved", "trucks": 2, "bins_total": 31, "due_left_out": 0,
+    "distance_km": 52, "landfill_trips": 3, "last_truck_back": "09:12", "alerts": [],
+    "routes": [{"truck": "Truck 1", "vehicle_id": "TRK-1", "bins": 18, "start": "06:00", "back_by": "09:12",
+                "landfill_trips": 2, "km": 29, "first_stop": "Sanpada Railway Station", "first_stop_time": "06:07",
+                "urgent_stops": ["D-Mart Juinagar at 06:21"]},
+               {"truck": "Truck 2", "vehicle_id": "TRK-2", "bins": 13, "start": "06:00", "back_by": "08:40",
+                "landfill_trips": 1, "km": 23, "first_stop": "Sector-7 Ground", "first_stop_time": "06:11",
+                "urgent_stops": []}],
+}
+SELFCHECK_KINDS = ("briefing", "driver_en", "driver_hi", "driver_mr")
+
+
+def selfcheck(conn: sqlite3.Connection) -> dict:
+    """One test prompt per use through the real path (model + figure check). A use is offered in the app
+    only if its test passes; the result is kept until the model changes."""
+    import time
+    stt = status(conn)
+    out = {"model": stt.get("model"), "ts": int(time.time()), "ran": stt["ok"], "kinds": {}}
+    if not stt["ok"]:
+        out["reason"] = f"language model not running ({stt.get('error')})"
+    else:
+        f = SAMPLE_FACTS
+        r = f["routes"][0]
+        tests = {
+            "briefing": (("Write the pre-shift briefing (at most 120 words, English) for the ward supervisor from "
+                          "these facts:\n" + json.dumps(f, ensure_ascii=False)), f, template_briefing(f),
+                         [str(f["bins_total"]), f["last_truck_back"]]),
+        }
+        for lang in ("en", "hi", "mr"):
+            tests[f"driver_{lang}"] = ((f"Write a short message (at most 60 words) in {LANG_NAMES[lang]} for the crew "
+                                        f"of {r['truck']} from these facts:\n" + json.dumps(r, ensure_ascii=False)),
+                                       r, template_driver(r, lang), [str(r["bins"]), r["start"], r["back_by"]])
+        for kind, (prompt, facts, fallback, req) in tests.items():
+            t0 = time.time()
+            res = _generate(conn, prompt, facts, fallback, True, req)
+            out["kinds"][kind] = {"ok": res["source"] == "Granite", "seconds": round(time.time() - t0, 1),
+                                  "why": res.get("error"), "sample": (res.get("rejected") or res["text"])[:400]}
+    with db.tx(conn):
+        db.set_meta(conn, "llm_selfcheck", json.dumps(out, ensure_ascii=False))
+    return out
+
+
+def selfcheck_result(conn: sqlite3.Connection) -> dict | None:
+    raw = db.get_meta(conn, "llm_selfcheck")
+    return json.loads(raw) if raw else None
+
+
+def usable(conn: sqlite3.Connection, kind: str) -> bool:
+    """Offer Granite for this use? Only when the server runs the same model that passed this use's test."""
+    stt = status(conn)
+    sc = selfcheck_result(conn)
+    return bool(stt["ok"] and sc and sc.get("model") == stt.get("model") and sc["kinds"].get(kind, {}).get("ok"))
+
+
+def any_usable(conn: sqlite3.Connection) -> bool:
+    return any(usable(conn, k) for k in SELFCHECK_KINDS)
+
+
+def selfcheck_needed(conn: sqlite3.Connection) -> bool:
+    stt = status(conn)
+    sc = selfcheck_result(conn)
+    return bool(stt["ok"] and (sc is None or sc.get("model") != stt.get("model") or not sc.get("ran")))

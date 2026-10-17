@@ -81,7 +81,7 @@ def due_status(conn: sqlite3.Connection, bins: list[dict], day: date, now_ts: in
     return out
 
 
-def _rates(conn, at_ts: int, hours: int, bins: list[dict], bad_sensors: set[str]):
+def _rates(conn, at_ts: int, hours: int, bins: list[dict], bad_sensors: set[str], job: str = "planning"):
     """Fill state now and hourly fill rates ahead. Uses the promoted ML forecaster when
     available, otherwise the learned hourly profile."""
     profiles = state.rate_profiles(conn, at_ts, bad_sensors=bad_sensors)
@@ -90,7 +90,7 @@ def _rates(conn, at_ts: int, hours: int, bins: list[dict], bad_sensors: set[str]
     source = "hourly profile (baseline)"
     from . import forecast
     ml = forecast.predict_rates(conn, at_ts, hours, [b for b in bins if b["id"] not in bad_sensors], st,
-                                fallback=rates)
+                                fallback=rates, job=job)
     if ml is not None:
         rates, source = ml["rates"], ml["source"]
     return st, rates, profiles, source
@@ -177,7 +177,8 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
                 excluded[r[0]] = "reported missing by the crew"
 
     hours = HORIZON_MIN // 60 + 1
-    st, rates, profiles, src = _rates(conn, start_ts, hours, bins_all, bad_sensors or set())
+    job = "what-if" if scenario else "evening round" if kind == "extra" else "re-plan" if kind == "replan" else "planning"
+    st, rates, profiles, src = _rates(conn, start_ts, hours, bins_all, bad_sensors or set(), job)
     if scenario.get("surge"):
         sg = scenario["surge"]
         c = bins.get(sg.get("center_bin")) if sg.get("center_bin") else None

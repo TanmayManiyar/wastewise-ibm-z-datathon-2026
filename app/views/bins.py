@@ -151,7 +151,7 @@ def report_tab() -> None:
                 q = "We could not recognise the place - choose the bin"
                 options = [b["id"] for b in bins]
                 from wastewise import llm
-                if llm.status(c)["ok"] and box.button("Ask Granite which place is meant"):
+                if llm.any_usable(c) and box.button("Ask Granite which place is meant"):
                     words = llm.complaint_place_words(c, text)
                     if words:
                         und2 = complaints.understand(" ".join(words) + " " + text, _index())

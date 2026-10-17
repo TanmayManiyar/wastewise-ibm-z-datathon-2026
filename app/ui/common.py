@@ -103,6 +103,20 @@ def platform_badge() -> dict:
     return platform_info.detect()
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def engine_label() -> str | None:
+    """What runs the forecaster's trees here, with the times measured on this machine."""
+    from wastewise import forecast
+    try:
+        c = forecast._inference_model(db.connect())
+    except Exception:
+        return None
+    if not c:
+        return None
+    eng = c.get("engine")
+    return eng.summary() if eng else f"forecast trees on the CPU ({c['model'].gbt_lib})"
+
+
 def header_badge() -> str:
     """'IBM LinuxONE s390x · Telum yes · <engine> · Granite' style badge."""
     p = platform_badge()
@@ -112,7 +126,7 @@ def header_badge() -> str:
         parts.append("Telum " + ("yes" if p["telum"] else "no"))
     else:
         parts.append(f"{p['system']} {p['arch']} - not LinuxONE")
-    eng = st.session_state.get("_engine_label")
+    eng = engine_label()
     if eng:
         parts.append(eng)
     llm = st.session_state.get("_llm_label")

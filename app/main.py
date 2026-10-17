@@ -50,8 +50,7 @@ nav = st.navigation(pages)
 @st.cache_data(ttl=60, show_spinner=False)
 def _llm_ok(_v: int) -> str | None:
     from wastewise import db, llm
-    s = llm.status(db.connect())
-    return "Granite" if s["ok"] else None
+    return "Granite" if llm.any_usable(db.connect()) else None      # only after it passed the self-check
 
 
 st.session_state._llm_label = _llm_ok(0)
