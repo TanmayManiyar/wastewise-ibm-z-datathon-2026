@@ -143,6 +143,12 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at INTEGER NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS synthetic_truth (
+    bin_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    fill_pct REAL NOT NULL,        -- true fill incl. overflow (>100); synthetic evaluation only
+    PRIMARY KEY (bin_id, ts)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS models (
     id INTEGER PRIMARY KEY,
     created_at INTEGER NOT NULL,

@@ -14,8 +14,12 @@ OSM_RAW = DATA_DIR / "osm_sanpada.json"
 ROADS_CACHE = DATA_DIR / "roads.npz"
 MILDURA_DIR = DATA_DIR / "mildura"
 
-# Timezone of the ward office (India Standard Time, no DST).
+# Timezone of the ward office (India Standard Time, UTC+05:30, no DST).
+# A fixed offset avoids depending on the tz database (absent on Windows).
+from datetime import timedelta, timezone  # noqa: E402
+
 TZ_NAME = "Asia/Kolkata"
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 # Bounding box of the study area: Sanpada node plus the roads to the
 # Turbhe landfill (south, west, north, east).
