@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# runtime data: database, downloaded extracts, generated secrets, models
+data/*
+!data/.gitkeep
+secrets/
+models/*.gguf
+*.log
+.streamlit/secrets.toml

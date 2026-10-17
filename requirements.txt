@@ -1,0 +1,9 @@
+# WasteWise runtime dependencies.
+# The core engine (wastewise/ minus the UI) needs only numpy + the standard library.
+# Every package below must install on IBM LinuxONE (s390x, big-endian); see
+# docs/S390X_NOTES.md for how each one was obtained on the VM.
+numpy>=1.26
+pandas>=2.1
+scikit-learn>=1.4
+streamlit>=1.36
+plotly>=5.20
