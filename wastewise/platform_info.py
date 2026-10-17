@@ -39,6 +39,24 @@ def _lscpu() -> str:
         return ""
 
 
+def zdnn_status() -> dict:
+    """Ask IBM zDNN (the library Snap ML uses for the accelerator) whether NNPA is usable."""
+    import ctypes
+    import ctypes.util
+    name = ctypes.util.find_library("zdnn")
+    if not name:
+        return {"zdnn": None, "nnpa_usable": False, "reason": "libzdnn not installed"}
+    try:
+        z = ctypes.CDLL(name)
+        z.zdnn_init()
+        z.zdnn_is_nnpa_installed.restype = ctypes.c_bool
+        z.zdnn_get_library_version_str.restype = ctypes.c_char_p
+        return {"zdnn": z.zdnn_get_library_version_str().decode(),
+                "nnpa_usable": bool(z.zdnn_is_nnpa_installed()), "reason": None}
+    except (OSError, AttributeError) as exc:
+        return {"zdnn": name, "nnpa_usable": False, "reason": str(exc)}
+
+
 @lru_cache(maxsize=1)
 def detect() -> dict:
     arch = platform.machine()
@@ -67,6 +85,8 @@ def detect() -> dict:
         "cpu_model_name": model_name,
         "nnpa_feature": nnpa,
         "telum": telum,
+        **(zdnn_status() if arch == "s390x" else {"zdnn": None, "nnpa_usable": False,
+                                                  "reason": "not s390x"}),
         "python": platform.python_version(),
         "system": f"{platform.system()} {platform.release()}",
     }

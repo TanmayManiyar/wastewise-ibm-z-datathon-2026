@@ -20,7 +20,8 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq \
     python3.12-venv python3-pip python3-dev build-essential gfortran cmake ninja-build pkg-config \
     python3-numpy python3-scipy python3-pandas python3-sklearn python3-joblib python3-threadpoolctl \
-    python3-pil libre2-dev libutf8proc-dev rapidjson-dev libssl-dev sqlite3 curl
+    python3-pil libre2-dev libutf8proc-dev rapidjson-dev libssl-dev sqlite3 curl \
+    libzdnn0 libzdnn-dev   # IBM zDNN: lets Snap ML run tree inference on the Telum NNPA
 
 if [ ! -x "$VENV/bin/python" ] || ! grep -q "include-system-site-packages = true" "$VENV/pyvenv.cfg"; then
     rm -rf "$VENV"

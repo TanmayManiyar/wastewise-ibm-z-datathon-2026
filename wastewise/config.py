@@ -19,7 +19,7 @@ TZ_NAME = "Asia/Kolkata"
 
 # Bounding box of the study area: Sanpada node plus the roads to the
 # Turbhe landfill (south, west, north, east).
-BBOX = (19.040, 72.995, 19.100, 73.050)
+BBOX = (19.040, 72.990, 19.090, 73.035)
 
 
 def ensure_dirs() -> None:
