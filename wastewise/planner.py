@@ -318,8 +318,12 @@ def make_alerts(ctx: Context, plan: dict) -> list[dict]:
                     "bins": [u["bin_id"] for u in left]})
     red = [s for r in plan["routes"] for s in r["stops"] if s["kind"] == "bin" and s["status"] == "red"]
     if red:
-        out.append({"level": "warning", "text": f"{len(red)} bin(s) are expected to be full already at the start.",
-                    "action": "Check with the supervisor; these are placed early in their routes.",
+        red.sort(key=lambda s: s["arrive_ts"])
+        visits = ", ".join(f"{s['bin_id']} {_hhmm(s['arrive_ts'])}" for s in red[:6])
+        out.append({"level": "warning", "text": f"{len(red)} bin(s) are expected to be full already at the start. "
+                                                f"Planned visits: {visits}{' ...' if len(red) > 6 else ''}.",
+                    "action": "Ask the supervisor to check the latest of these; send the spare vehicle if people "
+                              "complain before the planned visit.",
                     "bins": [s["bin_id"] for s in red]})
     waits = sorted((s for r in plan["routes"] for s in r["stops"] if s["kind"] == "bin" and s["overflow_min"] >= 30),
                    key=lambda s: -s["overflow_min"])

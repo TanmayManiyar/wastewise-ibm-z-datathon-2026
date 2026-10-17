@@ -11,3 +11,4 @@ models/*
 evidence/*.tmp
 *.log
 .streamlit/secrets.toml
+.claude/

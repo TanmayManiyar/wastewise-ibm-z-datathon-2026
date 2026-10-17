@@ -245,6 +245,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "beat_penalty_min": 12.0,          # cost of serving a bin from another truck's beat
     "optimiser_seconds": 8.0,
     "telum_inference": "auto",         # auto | cpu | accelerator
+    "map_tiles": "osm",                # osm (browser loads OpenStreetMap tiles) | offline
     "llm_enabled": True,
     "demo_feed": False,
 }
