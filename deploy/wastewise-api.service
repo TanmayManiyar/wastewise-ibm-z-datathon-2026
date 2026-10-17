@@ -1,0 +1,14 @@
+# systemd user service for the WasteWise REST ingestion API (see wastewise-app.service for install steps).
+[Unit]
+Description=WasteWise REST ingestion API
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/wastewise
+Environment=WW_HOST=127.0.0.1
+ExecStart=%h/wastewise/.venv/bin/python -m wastewise.api --host ${WW_HOST} --port 8600
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

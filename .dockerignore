@@ -1,0 +1,9 @@
+.venv
+.git
+.claude
+data
+secrets
+models
+evidence
+**/__pycache__
+.pytest_cache
