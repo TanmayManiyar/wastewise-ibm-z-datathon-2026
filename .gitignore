@@ -6,6 +6,8 @@ __pycache__/
 data/*
 !data/.gitkeep
 secrets/
-models/*.gguf
+models/*
+!models/.gitkeep
+evidence/*.tmp
 *.log
 .streamlit/secrets.toml
