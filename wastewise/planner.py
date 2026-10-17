@@ -100,6 +100,7 @@ class Context:
     forecast_source: str
     scenario: dict
     excluded: dict[str, str]
+    start_notes: dict[str, str]
 
 
 def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str = "daily",
@@ -212,7 +213,9 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
     # Truck start states.
     dep = net.index("DEPOT")
     vlist = []
-    starts = (replan_starts(conn, plan_for_replan, net, now_ts, bins) if kind == "replan" and plan_for_replan else {})
+    start_notes: dict[str, str] = {}
+    starts = (replan_starts(conn, plan_for_replan, net, now_ts, bins, start_notes)
+              if kind == "replan" and plan_for_replan else {})
     for v in vehicles:
         pos, load = starts.get(v["id"], (dep, 0.0))
         vlist.append(optimiser.Vehicle(v["id"], float(v["capacity_l"]), pos, float(start_ts), float(shift_end),
@@ -229,16 +232,20 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
         owner=owner, risk=curves, vehicles=vlist, unload_s=60.0 * float(places["landfill"]["unload_min"]),
         params=optimiser.CostParams(beat_penalty=float(s["beat_penalty_min"])))
     return Context(prob, net, bins, vehicles, settings, start_ts, shift_end, day, kind, due, st, src, scenario,
-                   excluded)
+                   excluded, start_notes)
 
 
-def replan_starts(conn, plan: dict, net: roads.Network, now_ts: int, bins: dict) -> dict[str, tuple[int, float]]:
+def replan_starts(conn, plan: dict, net: roads.Network, now_ts: int, bins: dict,
+                  notes: dict[str, str] | None = None) -> dict[str, tuple[int, float]]:
     """Where each truck is now and how much it carries, from crew updates (or the plan timetable)."""
+    from . import proof
+    notes = {} if notes is None else notes
     out = {}
+    gps = proof.last_positions(conn, now_ts, max_age_s=proof.POSITION_MAX_AGE_S)
     for route in plan["routes"]:
         vid = route["vehicle_id"]
-        evs = db.rows(conn, "SELECT * FROM events WHERE plan_id=? AND vehicle_id=? AND ts<=? ORDER BY ts",
-                      (plan["id"], vid, now_ts))
+        evs = db.rows(conn, "SELECT * FROM events WHERE plan_id=? AND vehicle_id=? AND ts<=? AND kind<>'position'"
+                            " ORDER BY ts", (plan["id"], vid, now_ts))
         pos, load = net.index("DEPOT"), 0.0
         if evs:
             for e in evs:
@@ -255,6 +262,17 @@ def replan_starts(conn, plan: dict, net: roads.Network, now_ts: int, bins: dict)
                 if s["depart_ts"] <= now_ts:
                     pos = net.index(s["stop_id"])
                     load = s["load_after_l"]
+        g = gps.get(vid)
+        if g and (not evs or g["ts"] >= evs[-1]["ts"]):
+            # The phone's GPS is newer than the last crew update: start from the stop nearest to the truck.
+            pos, d = proof.nearest_stop(net, g["lat"], g["lon"])
+            notes[vid] = (f"from its GPS position at {_hhmm(g['ts'])} (nearest stop "
+                                f"{bins[net.stop_ids[pos]]['landmark'] if net.stop_ids[pos] in bins else net.stop_ids[pos].title()},"
+                                f" {int(round(d, -1))} m away)")
+        elif evs:
+            notes[vid] = f"from its last crew update at {_hhmm(evs[-1]['ts'])}"
+        else:
+            notes[vid] = "from the timetable (no crew update or GPS position yet)"
         out[vid] = (pos, load)
     return out
 
@@ -303,7 +321,8 @@ def _route_json(ctx: Context, k: int, seq: list[int]) -> dict:
                "arrive_ts": int(round(s["arrive_ts"])), "depart_ts": int(round(s["depart_ts"])),
                "load_before_l": round(s["load_before_l"]), "load_after_l": round(s["load_after_l"]),
                "drive_min": round(s["drive_s"] / 60, 1), "drive_km": round(s["drive_m"] / 1000, 2),
-               "lat": float(net.graph.lat[s["stop"]]), "lon": float(net.graph.lon[s["stop"]])}
+               "lat": float(net.graph.lat[net.stop_node[s["stop"]]]),
+               "lon": float(net.graph.lon[net.stop_node[s["stop"]]])}
         if s["kind"] == "bin":
             b = ctx.bins[sid]
             i = s["bin"]
@@ -458,6 +477,8 @@ def generate(conn: sqlite3.Connection, user: str | None = None, kind: str = "dai
         "created_at": now_ts, "created_by": user, "label": "computed from SYNTHETIC demonstration data"
         if db.get_meta(conn, "synthetic_info") else None,
         "scenario": ctx.scenario, "forecast_source": ctx.forecast_source,
+        "replan_of_id": (replan_of or {}).get("id") if kind == "replan" else None,
+        "start_notes": ctx.start_notes,
         "candidates": len(prob.bin_ids), "due_bins": int(sum(prob.due)), "excluded": ctx.excluded,
         "bad_sensors": sorted(bad_sensors or []),
         "routes": routes, "unserved": unserved, "kpis": k_plan, "baseline": base,

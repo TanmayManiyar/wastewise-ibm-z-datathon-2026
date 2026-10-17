@@ -13,7 +13,7 @@ headless = true
 runOnSave = false
 fileWatcherType = "none"
 enableXsrfProtection = true
-maxUploadSize = 5
+maxUploadSize = 15          # MB; phone photos are shrunk to 1600 px when saved (wastewise/proof.py)
 port = 8501
 
 [runner]

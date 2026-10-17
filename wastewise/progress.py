@@ -79,7 +79,8 @@ def status_rows(conn: sqlite3.Connection, day: str, now_ts: int, late_min: int |
             row = dict(p, actual_ts=None, fill_reported=None, delay_min=None, by=None,
                        round="Evening" if round_ == "extra" else "Morning")
             if e:
-                row.update(actual_ts=e["ts"], fill_reported=e["fill_before"], by=e.get("person") or e["user"])
+                row.update(actual_ts=e["ts"], fill_reported=e["fill_before"], by=e.get("person") or e["user"],
+                           event_id=e["id"], dist_m=e.get("dist_m"), photo=e.get("photo"), kind=e["kind"])
                 row["delay_min"] = round((e["ts"] - p["planned_ts"]) / 60)
                 if e["kind"] == "collected":
                     row["status"] = "late" if row["delay_min"] > late_min else "collected"
@@ -146,6 +147,32 @@ def route_for(conn: sqlite3.Connection, day: str, vehicle_id: str) -> tuple[dict
     return out
 
 
+def record_position(conn: sqlite3.Connection, vehicle_id: str, gps: dict, user: str, person: str | None = None,
+                    plan_id: int | None = None) -> None:
+    """"Update my position" on the crew phone: where the truck is now (used by re-plans and the map)."""
+    with db.tx(conn):
+        db.add_event(conn, "position", None, vehicle_id, plan_id, user=user, person=person, gps=gps)
+        audit.log(conn, user, "truck_position", {"vehicle": vehicle_id, "person": person})
+
+
+def route_changes(conn: sqlite3.Connection, old: dict | None, new: dict, vehicle_id: str) -> dict:
+    """What changed for one truck between two versions of the day's route: bins added and removed
+    (bins already handled are not mentioned)."""
+    def bins_of(p):
+        if not p:
+            return []
+        r = next((x for x in p["routes"] if x["vehicle_id"] == vehicle_id), None)
+        return [s for s in (r or {}).get("stops", []) if s["kind"] == "bin"]
+    before, after = bins_of(old), bins_of(new)
+    b_ids, a_ids = {s["bin_id"] for s in before}, {s["bin_id"] for s in after}
+    done = {r[0] for r in conn.execute("SELECT DISTINCT bin_id FROM events WHERE bin_id IS NOT NULL AND kind IN"
+                                       " ('collected','could_not_reach','bin_missing') AND ts>=?",
+                                       (new["start_ts"] - 6 * 3600,))}
+    added = [s for s in after if s["bin_id"] not in b_ids and s["bin_id"] not in done]
+    removed = [s for s in before if s["bin_id"] not in a_ids and s["bin_id"] not in done]
+    return {"added": added, "removed": removed, "stops": len(after)}
+
+
 def crew_day(conn: sqlite3.Connection, vehicle_id: str, now_ts: int | None = None) -> str:
     """Which day's route the crew phone shows: today's while it has stops left, otherwise the next
     shift's approved route (for example tomorrow's, in the evening)."""
@@ -200,15 +227,20 @@ def load_on_board(conn: sqlite3.Connection, plan: dict, route: dict, bins: dict[
 
 def record_crew(conn: sqlite3.Connection, plan: dict, vehicle_id: str, kind: str, user: str,
                 bin_id: str | None = None, fill: float | None = None, ts: int | None = None,
-                note: str | None = None, person: str | None = None) -> None:
-    """person: the crew member who tapped (crew accounts are shared by everyone on the truck)."""
+                note: str | None = None, person: str | None = None, gps: dict | None = None,
+                photo: str | None = None) -> None:
+    """person: the crew member who tapped (crew accounts are shared by everyone on the truck).
+    gps: the phone's position at the tap, photo: stored photo path (proof of service, see proof.py)."""
+    from . import proof
     ts = ts or db.now()
+    dist = proof.distance_to_bin(conn, bin_id, (gps or {}).get("lat"), (gps or {}).get("lon")) if gps else None
     with db.tx(conn):
         db.add_event(conn, kind, bin_id, vehicle_id, plan["id"], fill_before=fill, ts=ts, user=user, note=note,
-                     person=person)
+                     person=person, gps=gps, dist_m=dist, photo=photo)
         if kind == "collected" and bin_id:
             db.add_reading(conn, bin_id, 2.0, "crew", ts=ts + 1, user=user, note="emptied")
         if kind == "could_not_reach" and bin_id and fill is not None:
             db.add_reading(conn, bin_id, fill, "crew", ts=ts, user=user, note="seen, not collected")
         audit.log(conn, user, f"crew_{kind}", {"plan_id": plan["id"], "vehicle": vehicle_id, "bin_id": bin_id,
-                                               "fill": fill, "note": note, "person": person})
+                                               "fill": fill, "note": note, "person": person,
+                                               "dist_m": dist, "photo": bool(photo)})

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from wastewise import db, pdfs, progress
+from wastewise import db, pdfs, progress, proof
 
 from ui.common import can, conn, hhmm, log, mark_seen, user
 from ui.tables import Col, table
@@ -12,6 +12,13 @@ STATUS_LABEL = {"collected": "Collected", "late": "Collected late", "could_not_r
                 "bin_missing": "Bin missing", "overdue": "Overdue", "missed": "Missed", "pending": "To do"}
 STATUS_COLOUR = {"collected": "green", "late": "amber", "could_not_reach": "red", "bin_missing": "red",
                  "overdue": "orange", "missed": "red", "pending": "grey"}
+
+
+def _proof_pill(r: dict):
+    if not r.get("actual_ts") or r.get("kind") is None:
+        return None
+    colour, text = proof.verdict({"kind": r["kind"], "dist_m": r.get("dist_m"), "photo": r.get("photo")})
+    return (text, colour) if text else None
 
 
 def tab(day) -> None:
@@ -47,13 +54,25 @@ def tab(day) -> None:
     table([{"round": r.get("round", ""), "truck": r["vehicle_name"], "place": r["landmark"], "planned": hhmm(r["planned_ts"]),
             "actual": hhmm(r["actual_ts"]) if r["actual_ts"] else "", "late": late_text(r),
             "status": (STATUS_LABEL[r["status"]], STATUS_COLOUR[r["status"]]),
-            "fill": f"{r['fill_reported']:.0f}%" if r["fill_reported"] is not None else "", "by": r["by"] or ""}
+            "fill": f"{r['fill_reported']:.0f}%" if r["fill_reported"] is not None else "", "by": r["by"] or "",
+            "proof": _proof_pill(r)}
            for r in rows],
           ([Col("round", "Round")] if evening_too else []) +
           [Col("truck", "Truck"), Col("place", "Place"), Col("planned", "Planned"), Col("actual", "Done at"),
            Col("late", ""), Col("status", "Status", "pill"), Col("fill", "How full (crew said)"),
-           Col("by", "Recorded by")], max_height=520)
+           Col("proof", "Proof of service", "pill"), Col("by", "Recorded by")], max_height=520)
+    photos = [r for r in rows if r.get("photo")]
+    if photos:
+        with st.expander(f"Photos from the crews ({len(photos)})"):
+            cols = st.columns(3)
+            for i, r in enumerate(photos):
+                data = proof.photo_bytes(r["photo"])
+                if data:
+                    cols[i % 3].image(data, caption=f"{r['landmark']} · {STATUS_LABEL[r['status']]} · "
+                                                    f"{hhmm(r['actual_ts'])} · {r['by'] or ''}")
     a, b, _ = st.columns([1, 1, 2])
+    for r in rows:
+        r["proof_text"] = (_proof_pill(r) or ("", ""))[0]
     pdf = pdfs.shift_report(d, rows, summ, STATUS_LABEL, demo=bool(db.get_meta(c, "synthetic_info")))
     if a.download_button("End-of-shift report (PDF)", pdf, file_name=f"end_of_shift_{d}.pdf",
                          mime="application/pdf", icon=":material/picture_as_pdf:"):

@@ -79,10 +79,10 @@ def test_reports(conn, plan):
 
 # ---------------------------------------------------------------- what-if
 def test_whatif_extra_truck_and_surge(conn):
-    base = planner.generate(conn, "x", now_ts=NOW_TS - 3600, seconds=2, seed=2)
-    extra = planner.generate(conn, "x", now_ts=NOW_TS - 3600, seconds=2, seed=2,
+    base = planner.generate(conn, "x", now_ts=NOW_TS - 3600, seconds=60, max_iter=300, seed=2)
+    extra = planner.generate(conn, "x", now_ts=NOW_TS - 3600, seconds=60, max_iter=300, seed=2,
                              scenario={"extra_truck": {"id": "TRK-X", "name": "Spare", "capacity_l": 6000}})
     assert extra["verifier"]["ok"] and len(extra["routes"]) == len(base["routes"]) + 1
-    rush = planner.generate(conn, "x", now_ts=NOW_TS - 3600, seconds=2, seed=2,
+    rush = planner.generate(conn, "x", now_ts=NOW_TS - 3600, seconds=60, max_iter=300, seed=2,
                             scenario={"surge": {"center_bin": "SNP-040", "radius_m": 400, "factor": 2.5}})
     assert rush["verifier"]["ok"] and rush["kpis"]["litres"] > base["kpis"]["litres"]

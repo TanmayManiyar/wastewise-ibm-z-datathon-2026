@@ -82,6 +82,11 @@ CREATE TABLE IF NOT EXISTS events (
     synthetic INTEGER NOT NULL DEFAULT 0,
     user TEXT,
     person TEXT,                   -- the crew member who tapped (the account is shared by the truck)
+    lat REAL,                      -- phone GPS position at the tap (with the crew's permission)
+    lon REAL,
+    gps_acc_m REAL,
+    dist_m REAL,                   -- distance from the bin (proof of service)
+    photo TEXT,                    -- photo file under data/photos
     note TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_events_bin_ts ON events(bin_id, ts);
@@ -165,6 +170,14 @@ CREATE TABLE IF NOT EXISTS truck_crew (
     ts INTEGER NOT NULL,
     PRIMARY KEY (day, vehicle_id)
 );
+CREATE TABLE IF NOT EXISTS route_ack (
+    day TEXT NOT NULL,
+    vehicle_id TEXT NOT NULL,
+    plan_id INTEGER NOT NULL,      -- the route version the crew has seen
+    ts INTEGER NOT NULL,
+    person TEXT,
+    PRIMARY KEY (day, vehicle_id)
+);
 CREATE TABLE IF NOT EXISTS synthetic_truth (
     bin_id TEXT NOT NULL,
     ts INTEGER NOT NULL,
@@ -216,8 +229,11 @@ def init(conn: sqlite3.Connection) -> None:
     # additive migrations for databases created by an older version
     if "rest_days" not in _columns(conn, "bins"):
         conn.execute("ALTER TABLE bins ADD COLUMN rest_days TEXT NOT NULL DEFAULT ''")
-    if "person" not in _columns(conn, "events"):
-        conn.execute("ALTER TABLE events ADD COLUMN person TEXT")
+    cols = _columns(conn, "events")
+    for col, typ in (("person", "TEXT"), ("lat", "REAL"), ("lon", "REAL"), ("gps_acc_m", "REAL"),
+                     ("dist_m", "REAL"), ("photo", "TEXT")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col} {typ}")
     migrate_demo_register(conn)
 
 
@@ -350,10 +366,13 @@ def add_reading(conn: sqlite3.Connection, bin_id: str, fill_pct: float | None, s
 def add_event(conn: sqlite3.Connection, kind: str, bin_id: str | None = None,
               vehicle_id: str | None = None, plan_id: int | None = None,
               fill_before: float | None = None, ts: int | None = None,
-              user: str | None = None, note: str | None = None, person: str | None = None) -> int:
+              user: str | None = None, note: str | None = None, person: str | None = None,
+              gps: dict | None = None, dist_m: float | None = None, photo: str | None = None) -> int:
+    gps = gps or {}
     cur = conn.execute(
-        "INSERT INTO events(ts, bin_id, vehicle_id, plan_id, kind, fill_before, synthetic, user, note, person) "
-        "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
-        (ts or now(), bin_id, vehicle_id, plan_id, kind, fill_before, user, note, person))
+        "INSERT INTO events(ts, bin_id, vehicle_id, plan_id, kind, fill_before, synthetic, user, note, person,"
+        " lat, lon, gps_acc_m, dist_m, photo) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (ts or now(), bin_id, vehicle_id, plan_id, kind, fill_before, user, note, person,
+         gps.get("lat"), gps.get("lon"), gps.get("acc"), dist_m, photo))
     bump_version(conn)
     return int(cur.lastrowid)

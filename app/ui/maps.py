@@ -76,7 +76,8 @@ def _places(fig: go.Figure, places: dict) -> None:
 
 def plan_map(plan: dict, places: dict, bins: list[dict], net: roads.Network | None = None,
              vehicles: list[str] | None = None, tiles: str = "osm", height: int = 620,
-             highlight: str | None = None) -> go.Figure:
+             highlight: str | None = None, positions: dict[str, dict] | None = None) -> go.Figure:
+    """positions: vehicle_id -> last GPS position {lat, lon, ts} (truck markers "last seen HH:MM")."""
     fig = _base(net, tiles)
     planned = set()
     for r in plan["routes"]:
@@ -122,8 +123,24 @@ def plan_map(plan: dict, places: dict, bins: list[dict], net: roads.Network | No
                                         marker=dict(size=40, color="rgba(220,38,38,0.25)"), hoverinfo="skip",
                                         showlegend=False))
     _places(fig, places)
+    _trucks(fig, plan, positions or {}, vehicles)
     c = (np.mean([b["lat"] for b in bins]), np.mean([b["lon"] for b in bins]))
     return _layout(fig, c, 14.2, height, tiles)
+
+
+def _trucks(fig: go.Figure, plan: dict, positions: dict[str, dict], vehicles: list[str] | None) -> None:
+    from wastewise import proof
+    for r in plan["routes"]:
+        p = positions.get(r["vehicle_id"])
+        if not p or (vehicles and r["vehicle_id"] not in vehicles):
+            continue
+        seen = proof.seen_text(p["ts"])
+        fig.add_trace(go.Scattermap(lat=[p["lat"]], lon=[p["lon"]], mode="markers+text",
+                                    marker=dict(size=26, color=r["color"]), text=[f"🚛 {r['vehicle_name']} · {seen}"],
+                                    textposition="top center", textfont=dict(size=13, color="#0F172A"),
+                                    hovertext=[f"<b>{r['vehicle_name']}</b><br>{seen} (phone GPS"
+                                               + (f", ±{int(p['acc'])} m" if p.get("acc") else "") + ")"],
+                                    hoverinfo="text", name=f"{r['vehicle_name']} now"))
 
 
 def bins_map(bins: list[dict], status: dict[str, str], fills: dict[str, float], places: dict,

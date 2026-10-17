@@ -5,7 +5,7 @@ import streamlit as st
 
 from datetime import datetime
 
-from wastewise import config, crews, db, evening, fmt, jobs, pdfs, planner, roads
+from wastewise import config, crews, db, evening, fmt, jobs, pdfs, planner, progress, proof, roads
 
 from ui import maps
 from ui.tables import Col, table
@@ -88,6 +88,58 @@ def route_pdf(p: dict, routes: list[dict]) -> bytes:
     c = conn()
     # crew names as entered on the crew phone that morning (blank line to write on otherwise)
     return pdfs.route_sheets(p, routes, crews.names_for_day(c, p["plan_date"]), db.places(c)["depot"]["name"])
+
+
+CREW_MSG = {
+    "en": ("{truck}: your route was changed at {time}.{added}{removed} Open My route on the phone for the new order.",
+           " New stops: ", " Removed (do not go): "),
+    "hi": ("{truck}: आपका रूट {time} बजे बदला गया।{added}{removed} नया क्रम फ़ोन पर My route में देखें।",
+           " नए स्टॉप: ", " हटाए गए (न जाएँ): "),
+    "mr": ("{truck}: तुमचा मार्ग {time} वाजता बदलला.{added}{removed} नवीन क्रम फोनवर My route मध्ये पहा.",
+           " नवीन थांबे: ", " काढलेले (जाऊ नका): "),
+}
+
+
+def crew_change_message(ch: dict, truck: str, at: int, lang: str) -> str:
+    tpl, add_w, rem_w = CREW_MSG[lang]
+    added = (add_w + ", ".join(f"{x['landmark']} ({hhmm(x['arrive_ts'])})" for x in ch["added"]) + ".") if ch["added"] else ""
+    removed = (rem_w + ", ".join(x["landmark"] for x in ch["removed"]) + ".") if ch["removed"] else ""
+    return tpl.format(truck=truck, time=hhmm(at), added=added, removed=removed)
+
+
+def replan_notes(p: dict) -> None:
+    """Where each truck starts in a re-plan, and what changed for each crew (with a WhatsApp message)."""
+    c = conn()
+    notes = p.get("start_notes") or {}
+    names = {r["vehicle_id"]: r["vehicle_name"] for r in p["routes"]}
+    if notes:
+        st.caption("Each truck starts " + "; ".join(f"**{names.get(v, v)}** {n}" for v, n in notes.items()) + ".")
+    old = planner.get(c, p["replan_of_id"]) if p.get("replan_of_id") else None
+    if not old:
+        return
+    changes = {r["vehicle_id"]: progress.route_changes(c, old, p, r["vehicle_id"]) for r in p["routes"]}
+    changed = {v: ch for v, ch in changes.items() if ch["added"] or ch["removed"]}
+    with st.expander(f"Tell the crews what changed ({len(changed)} truck(s) with changes)", expanded=bool(changed)
+                     and p["status"] == "approved"):
+        if not changed:
+            st.write("No truck gets new or removed stops - only the order or times changed.")
+            return
+        st.caption("Crews using the app see a banner (with vibration) as soon as this re-plan is approved. "
+                   "For crews without the app, send the message on WhatsApp - you choose the contact and press Send.")
+        lang = st.segmented_control("Language", ["en", "hi", "mr"], default="en", key=f"rp_lang_{p['id']}",
+                                    format_func={"en": "English", "hi": "हिंदी", "mr": "मराठी"}.get) or "en"
+        for v, ch in changed.items():
+            msg = crew_change_message(ch, names[v], p.get("approved_at") or p["created_at"], lang)
+            a, b = st.columns([4, 1.3])
+            a.markdown(f"**{names[v]}** · " + msg.split(": ", 1)[-1])
+            b.link_button("Send to crew on WhatsApp", complaints_whatsapp(msg), icon=":material/share:",
+                          disabled=p["status"] != "approved",
+                          help="Approve the re-plan first." if p["status"] != "approved" else None)
+
+
+def complaints_whatsapp(text: str) -> str:
+    from wastewise import complaints
+    return complaints.whatsapp_url(text)
 
 
 def summary_card(p: dict) -> None:
@@ -331,6 +383,8 @@ def _plan_body(day, hint: dict) -> None:
         st.error("This plan failed the independent check and cannot be approved: "
                  + "; ".join(p["verifier"]["errors"][:3]))
     summary_card(p)
+    if p["kind"] == "replan":
+        replan_notes(p)
     show_alerts(p["alerts"], p["created_at"], handled_since(p))
     kpi_row(p)
 
@@ -340,7 +394,9 @@ def _plan_body(day, hint: dict) -> None:
     sel = st.pills("Show trucks", vehicles, selection_mode="multi", default=vehicles, format_func=names.get,
                    key="truck_pills") or vehicles
     net = roads.network_for(c) if settings.get("map_tiles") == "offline" else None
-    fig = maps.plan_map(p, db.places(c), db.bins(c), net, sel, tiles=settings.get("map_tiles", "osm"))
+    positions = proof.last_positions(c) if p["plan_date"] == planner.today().isoformat() else {}
+    fig = maps.plan_map(p, db.places(c), db.bins(c), net, sel, tiles=settings.get("map_tiles", "osm"),
+                        positions=positions)
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
     st.caption("Each truck has its own colour (line and ring). The dot in the middle shows how full the bin will "
                f"be: {fmt.legend(fmt.PLAN_WORDS)}. Numbers = stop order. Grey = not in today's plan.")

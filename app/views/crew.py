@@ -5,9 +5,10 @@ import urllib.parse
 
 import streamlit as st
 
-from wastewise import crews, db, fmt, planner, progress
+from wastewise import crews, db, fmt, planner, progress, proof
 
 from ui.common import can, conn, hhmm, live_refresh, mark_seen, user
+from ui import gps as gps_ui
 from ui.i18n import LANGS, t
 
 FILL_CHOICES = [("q", 25.0), ("h", 50.0), ("t", 75.0), ("f", 100.0), ("o", 120.0)]
@@ -48,16 +49,14 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
                 icon=":material/event:")
     if plan.get("kind") == "extra":
         st.info(f"🌆 {t('evening', lang)} · {hhmm(plan['start_ts'])}", icon=":material/nights_stay:")
-    seen = st.session_state.get(f"{key}_plan_seen")
-    if seen and seen != plan["id"]:
-        st.warning(t("updated", lang) + f" ({hhmm(plan.get('approved_at'))})", icon=":material/sync:")
-    st.session_state[f"{key}_plan_seen"] = plan["id"]
-
-    person = None
+    person, fix = None, None
     if interactive:
         person = _who(plan["plan_date"], vehicle_id, lang, key)
         if person is None:
             return          # the crew first says who is on the truck today
+        if user()["role"] == "crew":
+            _route_change(plan, vehicle_id, lang, key, person)
+            fix = _location(lang, key)
     states = progress.stop_states(c, plan, route)
     bins = {b["id"]: b for b in db.bins(c, active_only=False)}
     vrow = next((v for v in db.vehicles(c, active_only=False) if v["id"] == vehicle_id), None)
@@ -85,7 +84,8 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
                        icon=":material/map:")
         if interactive and st.button(t("unloaded", lang), type="primary", use_container_width=True,
                                      key=f"{key}_unload"):
-            progress.record_crew(c, plan, vehicle_id, "landfill_unload", user()["username"], person=person)
+            progress.record_crew(c, plan, vehicle_id, "landfill_unload", user()["username"], person=person,
+                                 gps=fix)
             st.session_state[f"{key}_saved"] = "landfill_unload"
             mark_seen()
             st.rerun()
@@ -102,6 +102,17 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
     fill = st.segmented_control(t("how_full", lang), [k for k, _ in FILL_CHOICES], format_func=lambda k: t(k, lang),
                                 key=f"{key}_fill_{plan['id']}_{s['bin_id']}")
     fill_pct = dict(FILL_CHOICES).get(fill)
+    photo_file = st.file_uploader(t("photo", lang), type=["jpg", "jpeg", "png", "webp"],
+                                  key=f"{key}_photo_{plan['id']}_{s['bin_id']}")
+
+    def photo_path() -> str | None:
+        if photo_file is None:
+            return None
+        try:
+            return proof.save_photo(photo_file.getvalue(), plan["plan_date"])
+        except ValueError as exc:
+            st.error(str(exc))
+            return None
     c1, c2, c3 = st.columns(3)
     if c1.button(t("collected", lang), type="primary", use_container_width=True, key=f"{key}_ok_{s['bin_id']}",
                  icon=":material/check_circle:"):
@@ -109,22 +120,27 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
             st.warning(t("choose_fill", lang))
         else:
             progress.record_crew(c, plan, vehicle_id, "collected", user()["username"], s["bin_id"], fill_pct,
-                                 person=person)
+                                 person=person, gps=fix, photo=photo_path())
             st.session_state[f"{key}_saved"] = "collected"
             mark_seen()
             st.rerun()
     if c2.button(t("not_reach", lang), use_container_width=True, key=f"{key}_nr_{s['bin_id']}", icon=":material/block:"):
         progress.record_crew(c, plan, vehicle_id, "could_not_reach", user()["username"], s["bin_id"], fill_pct,
-                             person=person)
+                             person=person, gps=fix, photo=photo_path())
         st.session_state[f"{key}_saved"] = "could_not_reach"
         mark_seen()
         st.rerun()
     if c3.button(t("missing", lang), use_container_width=True, key=f"{key}_ms_{s['bin_id']}",
                  icon=":material/help:"):
-        progress.record_crew(c, plan, vehicle_id, "bin_missing", user()["username"], s["bin_id"], person=person)
-        st.session_state[f"{key}_saved"] = "bin_missing"
-        mark_seen()
-        st.rerun()
+        path = photo_path()
+        if path is None and user()["role"] == "crew":
+            st.warning(t("need_photo", lang))          # a missing bin needs a photo of the empty spot
+        else:
+            progress.record_crew(c, plan, vehicle_id, "bin_missing", user()["username"], s["bin_id"], person=person,
+                                 gps=fix, photo=path)
+            st.session_state[f"{key}_saved"] = "bin_missing"
+            mark_seen()
+            st.rerun()
     with st.expander(t("remaining", lang)):
         k = 0
         for x, st_ in zip(route["stops"], states):
@@ -134,6 +150,70 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
                 st.write(f"{mark} {k}. {hhmm(x['arrive_ts'])} · {x['landmark']}")
             elif x["kind"] == "landfill":
                 st.write(f"{'✅' if st_ == 'done' else '🚛'} {hhmm(x['arrive_ts'])} · {t('landfill', lang)}")
+
+
+def _location(lang: str, key: str) -> dict | None:
+    """Phone position for proof of service, plus the 'Update my position' button."""
+    fix, state = gps_ui.watch(f"{key}_gps")
+    a, b = st.columns([2, 1])
+    if state == "ok":
+        a.caption(f"📍 {t('gps_ok', lang)} (±{int(fix['acc'])} m)")
+    elif state in ("denied", "unavailable"):
+        a.caption(f"📍 {t('gps_' + state, lang)}")
+    else:
+        a.caption(f"📍 {t('gps_wait', lang)}")
+    if b.button(t("update_pos", lang), key=f"{key}_pos", disabled=fix is None, icon=":material/my_location:"):
+        progress.record_position(conn(), user()["vehicle_id"], fix, user()["username"],
+                                 person=st.session_state.get(f"{key}_person"))
+        st.toast(t("pos_saved", lang))
+        mark_seen()
+    return fix
+
+
+ALERT_JS = """<script>
+(function() {
+  const k = 'ww_route_alert_PLAN';
+  try { if (sessionStorage.getItem(k)) return; sessionStorage.setItem(k, '1'); } catch (e) {}
+  try { navigator.vibrate && navigator.vibrate([300, 150, 300, 150, 300]); } catch (e) {}
+  try {
+    const a = new (window.AudioContext || window.webkitAudioContext)();
+    [0, 0.35].forEach(t => { const o = a.createOscillator(); o.frequency.value = 880;
+      o.connect(a.destination); o.start(a.currentTime + t); o.stop(a.currentTime + t + 0.2); });
+  } catch (e) {}
+})();
+</script>"""
+
+
+def _route_change(plan: dict, vehicle_id: str, lang: str, key: str, person: str) -> None:
+    """Banner (with vibration and a beep where the phone allows it) when the control room changed the route
+    since the crew last confirmed it; the crew confirms with 'OK, understood'."""
+    c = conn()
+    day = plan["plan_date"]
+    ack = db.one(c, "SELECT plan_id FROM route_ack WHERE day=? AND vehicle_id=?", (day, vehicle_id))
+
+    def acknowledge():
+        with db.tx(c):
+            c.execute("INSERT INTO route_ack(day, vehicle_id, plan_id, ts, person) VALUES (?,?,?,?,?)"
+                      " ON CONFLICT(day, vehicle_id) DO UPDATE SET plan_id=excluded.plan_id, ts=excluded.ts,"
+                      " person=excluded.person", (day, vehicle_id, plan["id"], db.now(), person))
+    if ack is None or plan.get("kind") == "extra":
+        acknowledge()          # first route of the day (or the evening round): nothing to compare with
+        return
+    if ack["plan_id"] == plan["id"]:
+        return
+    old = planner.get(c, ack["plan_id"])
+    ch = progress.route_changes(c, old, plan, vehicle_id)
+    with st.container(border=True):
+        st.error(f"### 🔔 {t('route_changed', lang)} ({hhmm(plan.get('approved_at') or plan['created_at'])})")
+        if ch["added"]:
+            st.markdown(f"**➕ {t('added', lang)}:** " + ", ".join(f"{x['landmark']} ({hhmm(x['arrive_ts'])})"
+                                                                  for x in ch["added"]))
+        if ch["removed"]:
+            st.markdown(f"**➖ {t('removed', lang)}:** " + ", ".join(x["landmark"] for x in ch["removed"]))
+        if st.button(t("got_it", lang), type="primary", use_container_width=True, key=f"{key}_ack_{plan['id']}"):
+            acknowledge()
+            st.rerun()
+    st.html(ALERT_JS.replace("PLAN", str(int(plan["id"]))), unsafe_allow_javascript=True)
 
 
 def _who(day: str, vehicle_id: str, lang: str, key: str) -> str | None:
@@ -151,6 +231,7 @@ def _who(day: str, vehicle_id: str, lang: str, key: str) -> str | None:
         if b.button(t("change", lang), key=f"{key}_chg_crew"):
             st.session_state[f"{key}_edit_crew"] = True
             st.rerun()
+        st.session_state[f"{key}_person"] = cur["holder"] or cur["members"][0]
         return cur["holder"] or cur["members"][0]
     people = crews.members(c)
     own = [m["name"] for m in people if m["vehicle_id"] == vehicle_id]

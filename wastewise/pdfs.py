@@ -233,8 +233,8 @@ def shift_report(day: str, rows: list[dict], summary: dict[str, dict], labels: d
                                         f"{labels.get(r['status'], r['status'])}. {r['action']}"),
                            new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
-    cols = [("TRUCK", 34), ("PLACE", 86), ("PLANNED", 22), ("DONE AT", 22), ("STATUS", 40), ("HOW FULL", 26),
-            ("RECORDED BY", 43)]
+    cols = [("TRUCK", 30), ("PLACE", 68), ("PLANNED", 18), ("DONE AT", 18), ("STATUS", 32), ("HOW FULL", 20),
+            ("PROOF OF SERVICE", 48), ("RECORDED BY", 39)]
     _table_head(pdf, cols)
     pdf.set_font("Helvetica", "", 9)
     for r in rows:
@@ -244,7 +244,8 @@ def shift_report(day: str, rows: list[dict], summary: dict[str, dict], labels: d
             pdf.set_font("Helvetica", "", 9)
         vals = [r["vehicle_name"], r["landmark"], _hm(r["planned_ts"]), _hm(r["actual_ts"]),
                 labels.get(r["status"], r["status"]),
-                f"{r['fill_reported']:.0f}%" if r["fill_reported"] is not None else "", r["by"] or ""]
+                f"{r['fill_reported']:.0f}%" if r["fill_reported"] is not None else "", r.get("proof_text") or "",
+                r["by"] or ""]
         for (n, w), v in zip(cols, vals):
             pdf.cell(w, 7, _fit(pdf, v, w), border=1)
         pdf.ln()
