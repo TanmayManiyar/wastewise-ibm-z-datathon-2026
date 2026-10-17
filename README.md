@@ -48,21 +48,30 @@ leptospirosis and blocked drains. Trucks have a fixed capacity and shift, so the
 - **What-if**: truck breakdown, a rush around a bin, or a spare truck, compared with the normal plan and
   adoptable as a draft.
 - **Operations**
-  - Today's plan: nothing is computed until *Generate plan*; Draft/Approved badges; a banner when new data
-    arrived; alerts that each give a concrete action; *re-plan from now* during the shift only.
+  - Today's plan: nothing is computed until *Generate plan*, which runs in the background with live progress
+    (route variations tried, best km); Draft/Approved badges; a hint saying which actions are possible at this
+    time of day; *re-plan from now* during the shift only, starting each truck from its last GPS position.
   - Map: truck-coloured lines and rings, fill-status centres, stop numbers.
-  - Printable route sheets with landfill rows; the crew phone page; Progress (planned vs actual, late > 30 min,
-    exceptions with actions, paper-sheet entry, CSV).
+  - Printable PDF route sheets and end-of-shift report; the crew phone page (who is on the truck today, GPS +
+    photo proof of service: "verified, 35 m from the bin", route-change banner); Progress (planned vs actual,
+    and everything the crews recorded today); evening round suggested at the best time.
   - Complaints in English, Hindi, Marathi or mixed: "We understood: ... - confirm?". No bin is ever
     pre-selected, and if several places match the user is asked to choose.
-  - Live alerts that refresh by themselves.
+  - **Live alerts are predictions**: for every bin the forecaster's predicted full time is compared with its next
+    planned collection, giving the expected overflow and the chance the bin is full when the truck arrives;
+    surges are judged against the forecaster, not an average; advice depends on the time of day.
+  - Complaints get reference numbers (SNP-C-0001), a follow-up ("bin collected at 07:37 by Truck 3 - ready to
+    close") and WhatsApp acknowledgement/resolution texts in English, Hindi and Marathi. Only a person closes them.
+  - Road closures (routes avoid them), landfill gate hours and queue, truck fuel/maintenance log (out-of-service
+    trucks are left out), crew performance and a monthly NMMC summary (PDF + CSV).
   - REST ingestion API protected by an API key.
 - **Reports**: bin sizing, weekday x hour patterns, festival effect, 7-day outlook against fleet capacity,
   savings against the routine, and forecast accuracy.
-- **Local IBM Granite** through a llama.cpp server on the same machine (built on s390x and tested with the
-  big-endian Granite 4.0 H 350M *base* model, about 5.7 tokens/s; a base model does not follow
-  instructions, so its texts are rejected by the check and the templates are shown): the pre-shift briefing, driver
-  messages in English, Hindi and Marathi, and help locating the place in a complaint. **Every number, time
+- **Local IBM Granite** (instruction-tuned `granite-4.0-h-1b` Q8_0, converted to big-endian, llama.cpp on the
+  VM, about 1.4-3 tokens/s): crew messages in English, Hindi and Marathi, the pre-shift briefing and help
+  locating the place in a complaint. **A self-check at start-up** gives the model one test prompt per task;
+  only tasks that pass are offered (on the VM: the three crew messages pass, the briefing times out, so it
+  uses the template). **Every number, time
   and bin the model writes is checked against the plan.** If anything doesn't match, the checked template is
   shown instead and the reason is displayed.
 
@@ -100,26 +109,32 @@ big-endian, 3 vCPUs, Ubuntu 24.04, Python 3.12. Details and raw numbers are in
 - **No PyPI s390x wheels** for numpy, scipy, pandas, scikit-learn, pyarrow, LightGBM or XGBoost. The
   scientific stack comes from Ubuntu's s390x packages, and pyarrow 24.0.0 (needed by Streamlit) is built
   from the verified Apache source in about 7 min. LightGBM and XGBoost are built from source.
-- **All 90 tests pass on s390x**; see [evidence/ibm-datathon1-20261017T094104Z](evidence/ibm-datathon1-20261017T094104Z)
-  (captured by `scripts/capture_evidence.sh`, with SHA-256 checksums).
+- **All 146 tests pass on s390x** (18 Oct 2026, commit 376960a). Earlier evidence:
+  [evidence/ibm-datathon1-20261017T094104Z](evidence/ibm-datathon1-20261017T094104Z) (`scripts/capture_evidence.sh`).
 - Results came out identical on x86 and s390x: the synthetic generator produced the same 147 839 readings
   on both, and the forecaster's test errors match.
-- Road network build (7 634 nodes): 0.32 s. A full plan: 8.5 s including 1 048 ALNS iterations (763 on the
-  development laptop), verified independently. Forecaster training: 11 s.
+- Road network build (7 634 nodes): 0.32 s. A full plan on the VM: about 15-20 s (3 200-4 300 ALNS iterations,
+  stopping when no better plan is found), verified independently, made in the background.
 - **Telum**:
   - The `nnpa` CPU flag is present and IBM zDNN 1.0.1 reports the accelerator as usable.
   - Snap ML had silently fallen back to the CPU until `libzdnn0` was installed.
   - **Measured result**: on this z/VM guest, Snap ML's accelerator path (`zdnn_tensors`) was *slower* than
     Snap ML on the CPU (`compress_trees`) for every LightGBM model size tried. For a planning batch
     (720 rows, all 3 threads) it took 1.45 ms against 0.78 ms (native LightGBM: 1.28 ms).
-  - WasteWise therefore times both engines when the model loads, uses the faster one, and shows which in
-    the header. *Settings > AI* can force the accelerator. We don't claim a Telum speed-up we didn't measure.
+  - Every forecasting job (planning, re-plan, what-if, evening round, 7-day outlook, re-test, live alerts) goes
+    through one engine path. "auto" times CPU and Telum at a planning batch (720 rows) and a bulk batch
+    (20 000 rows) and uses the faster for each. Measured at start-up on 18 Oct: **CPU 0.7 vs Telum 1.5 ms,
+    bulk 20 vs 119 ms**, so the header says "Telum tested - CPU faster for these models". We don't claim a
+    Telum speed-up we didn't measure.
 
 ## Results (with honest labels)
 
 | What | Result | Data |
 |---|---|---|
-| Forecaster, locked test window (17 Sep-17 Oct 2026) | LightGBM 3.70, best baseline 4.15 fill points per 3 h (about 11 % better) | synthetic |
+| Forecaster, locked test window | 3.75, best baseline 4.29 fill points per 3 h (about 12 % better) | synthetic |
+| Forecaster, made exactly as the app makes them (data cut at the forecast time) | 3.74, learned pattern 4.42. Before the live-path fix of 18 Oct: 7.60 | synthetic |
+| **Real Indian test**: tomorrow's garbage complaints per ward, Bengaluru (198 wards, trained 2020-23, tested 2024-25) | 7 % lower Poisson deviance than the best simple rule (1.164 vs 1.251) | **real, BBMP** |
+| Measured Indian effects (BBMP complaints) | 1-3 days after a festival +15 % (Dasara +52 %, Bakrid +29 %); day after >20 mm rain +10 % | **real** |
 | Forecaster, real-world test (28 Dec 2022-1 Apr 2023) | LightGBM 2.73, best baseline 2.94 (about 7 % better). HistGB alone 2.96 is *not* better | **real, Mildura** |
 | Sanpada model applied to Mildura | 3.53: does **not** transfer (worse than the baselines) | real |
 | Fill state now, sensor bins | MAE 4.0 points, bias +0.3 | synthetic |
@@ -134,12 +149,17 @@ big-endian, 3 vCPUs, Ubuntu 24.04, Python 3.12. Details and raw numbers are in
   © OpenStreetMap contributors, ODbL 1.0.
 - **Mildura RRC Smart Bin Fill Levels**, Mildura Rural City Council, data.gov.au, CC BY 3.0 AU,
   downloaded fresh via the CKAN API. Its SHA-256 is recorded in `data/mildura/provenance.json`.
+- **BBMP grievances 2020-2025** (Bengaluru), OpenCity, public domain: 195 153 garbage complaints, no names stored.
+- **Open-Meteo historical weather** (ERA5, CC BY 4.0): hourly rain 2020-now for Sanpada and Bengaluru; the
+  synthetic Sanpada history uses the real Sanpada rain. `python -m wastewise.cli india-data` downloads all of it.
 - **Festival dates** (Ganeshotsav, Navratri, Diwali, ...) are approximate and should be checked against the
   official list.
 
 ## Security
 
-- Passwords: PBKDF2-HMAC-SHA256 with a random salt and 600 000 iterations, lock-out after 5 failures.
+- **Sign-in for the demonstration: one click by user type, no password** (Settings > Users can switch passwords
+  back on). Anyone with the link can enter as any user, including the administrator - turn it off for real use.
+- Passwords (when switched on): PBKDF2-HMAC-SHA256 with a random salt and 600 000 iterations, lock-out after 5 failures.
 - Stay signed in: after sign-in the browser keeps an HMAC-SHA256-signed session cookie (key in
   `secrets/session_key`), valid for one crew shift (12 h) or one office day (8 h), so a reload or a locked
   phone does not sign anyone out. Sign-out clears it and invalidates every earlier cookie of that account.
@@ -173,22 +193,24 @@ bash scripts/services.sh start                  # web app :8501 and REST API :86
 
 - All Sanpada figures come from synthetic data, so they show that the method works, not the savings NMMC
   would actually see.
-- The 180 days of history don't contain last year's Ganeshotsav, so the model can't learn that festival's
-  effect.
 - Bins without sensors are estimated far less accurately (MAE about 17 points): crews and supervisors
   estimate only to the nearest quarter or tenth.
 - Gradual sensor drift is mostly missed (recall 12 %).
 - The depot location and landfill gate are approximate. Truck speeds, service times and fuel factors are
   demonstration values to be set by the ward.
 - The Telum accelerator didn't speed up these small tree ensembles on the shared z/VM guest (measured above).
-- The available Granite model is a *base* model: on the VM its briefings fail the figure check, so the
-  templates are used. An instruction-tuned Granite GGUF (converted to big-endian) is needed for fluent text.
+- Granite on 3 vCPUs is slow (1.4-3 tokens/s): the briefing does not finish in time and uses the template.
+- No real fill-level data exists for Sanpada; Indian data (BBMP, rain) calibrates patterns but cannot measure
+  Sanpada's bins. Real Sanpada accuracy needs crew "how full" taps or sensors (both already recorded by the app).
+- BBMP timestamps lack AM/PM, so no hour-of-day effect is taken from them.
+- Not built: wet/dry two-compartment trucks.
 - The public demo link is a Cloudflare *quick tunnel* (random `trycloudflare.com` address, no uptime
   guarantee); a named tunnel or an opened port is needed for permanent access.
 
 ## Project layout
 
 `wastewise/` engine (db, osm, roads, area, synth, state, risk, forecast, anomaly, telum, optimiser,
-baseline, verifier, beats, planner, progress, complaints, live, api, llm, reports, auth, audit) ·
-`app/` Streamlit UI · `tests/` (90 tests) · `scripts/` setup, training, benchmarks, evidence, services ·
+baseline, verifier, beats, planner, progress, complaints, live, outlook_now, api, llm, reports, auth, audit,
+sessions, jobs, fmt, crews, proof, closures, fleet, india_data, india_calib, india_risk) ·
+`app/` Streamlit UI · `tests/` (146 tests) · `scripts/` setup, training, benchmarks, evidence, services ·
 `deploy/` systemd units · `Containerfile` · `docs/S390X_NOTES.md`
