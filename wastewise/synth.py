@@ -180,7 +180,13 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
     # Day-level factors shared by all bins.
     uniq_days = sorted(set(dates))
     day_rng = _rng(seed, "days")
-    rain = {d: (calendar_in.is_monsoon(d) and day_rng.random() < 0.6) for d in uniq_days}
+    # Real daily rain at Sanpada (Open-Meteo / ERA5) when downloaded; otherwise random monsoon rain days.
+    # A "rain day" is >= 2.5 mm (India Meteorological Department definition).
+    real_rain = _real_rain()
+    rain = {d: (real_rain[d] >= 2.5 if d in real_rain else (calendar_in.is_monsoon(d) and day_rng.random() < 0.6))
+            for d in uniq_days}
+    heavy_after = _heavy_rain_factor()
+    rain_source = "Open-Meteo (real, Sanpada)" if any(d in real_rain for d in uniq_days) else "random monsoon days"
     day_noise = {d: float(day_rng.lognormal(0, 0.10)) for d in uniq_days}
     trend = {d: 1.0 + 0.03 * (i / max(1, len(uniq_days) - 1)) for i, d in enumerate(uniq_days)}
 
@@ -206,6 +212,10 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
             f = calendar_in.festival_multiplier(d, sp.site_type) * day_noise[d] * trend[d]
             if rain[d]:
                 f *= RAIN_SENSITIVE.get(sp.site_type, 1.0) * WET_WASTE.get(sp.site_type, 1.0)
+            # measured on real Bengaluru data: more garbage problems after festivals and after heavy rain
+            f *= calendar_in.after_festival_multiplier(d)
+            if real_rain.get(d - timedelta(days=1), 0.0) > 20.0:
+                f *= heavy_after
             day_f[d] = f
         gen = np.array([sp.daily_l * day_f[dates[i]] for i in range(H)]) * sp.profile[hod] * week[dow] * 7 / week.sum()
         gen *= r.gamma(4.0, 0.25, H)
@@ -325,11 +335,28 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
         info = {"seed": seed, "days": days, "start_ts": int(hour_ts[0]), "end_ts": int(hour_ts[-1]),
                 "plan_day": plan_day.isoformat(), "generated_at": db.now(),
                 "rows": {"readings": len(readings), "events": len(events), "complaints": len(complaints)},
-                "stats": stats, "label": "SYNTHETIC DEMONSTRATION DATA"}
+                "stats": stats, "label": "SYNTHETIC DEMONSTRATION DATA", "rain": rain_source,
+                "india_calibration": bool(calendar_in._after_factors())}
         db.set_meta(conn, "synthetic_info", json.dumps(info))
         db.set_meta(conn, "synthetic_state", json.dumps({"ts": int(hour_ts[-1]) + 3600, "vol_l": final_state}))
         db.bump_version(conn)
     return info
+
+
+def _real_rain() -> dict:
+    try:
+        from . import india_data
+        return india_data.rain_daily("sanpada")
+    except Exception:
+        return {}
+
+
+def _heavy_rain_factor() -> float:
+    try:
+        from . import india_calib
+        return india_calib.factor(india_calib.load(), "rain", "day after heavy (>20 mm) rain", 1.0)
+    except Exception:
+        return 1.0
 
 
 def clear_synthetic(conn: sqlite3.Connection) -> None:

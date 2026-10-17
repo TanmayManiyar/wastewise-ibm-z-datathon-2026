@@ -255,6 +255,51 @@ def accuracy_tab(d: dict) -> None:
         st.caption(mm["label"])
 
 
+def india_tab() -> None:
+    """What real Indian data says, and how it is used."""
+    from wastewise import india_calib, india_data, india_risk
+    cal, risk, prov = india_calib.load(), india_risk.load_result(), india_data.provenance()
+    if not cal:
+        st.info("Not downloaded yet. The administrator runs `python -m wastewise.cli india-data` on the server.")
+        return
+    b = prov.get("bbmp", {})
+    st.markdown(f"**Real data:** {b.get('rows', 0):,} garbage complaints from Bengaluru (BBMP, 2020-2025, "
+                f"{b.get('licence', '')}) and hourly rain for Sanpada and Bengaluru (Open-Meteo, ERA5). "
+                "No real fill-level data exists for Sanpada - these calibrate the patterns, they do not measure "
+                "Sanpada's bins.")
+    st.markdown("**Measured effects** (relative to a normal day; 90 % interval; only clear effects are used)")
+    rows = [{"what": f"{r['festival']} - {r['effect']}", "factor": r} for r in cal["festivals"] if r["clear"]]
+    rows.append({"what": "1-3 days after any festival", "factor": cal["festival_any_1_3_days_after"]})
+    rows += [{"what": r["effect"].capitalize(), "factor": r} for r in cal["rain"]]
+    rows += [{"what": f"{r['effect']} (complaints are also a reporting habit)", "factor": r} for r in cal["weekday"]]
+
+    def pct(r):
+        return f"{(r['factor'] - 1) * 100:+.0f}% ({(r['low90'] - 1) * 100:+.0f} to {(r['high90'] - 1) * 100:+.0f})"
+    table([{"what": x["what"], "eff": pct(x["factor"]), "days": str(x["factor"]["days"]),
+            "used": ("Clear", "green") if x["factor"]["clear"] else ("Not clear", "grey")} for x in rows],
+          [Col("what", "When"), Col("eff", "Garbage problems vs a normal day"), Col("days", "Days"),
+           Col("used", "", "pill")], max_height=420)
+    st.caption("Used in WasteWise: real Sanpada rain, the post-festival surge and the day after heavy rain shape "
+               "the Sanpada demonstration history. Tested and not adopted: rain and days-since-festival as extra "
+               "forecaster inputs (no gain - the forecaster already sees these effects in each bin's recent "
+               "readings). Festival days themselves show fewer complaints (people and staff are busy), so no drop "
+               "in waste is assumed.")
+    if risk:
+        st.markdown("**Real-data test in India:** predicting tomorrow's garbage complaints per ward in Bengaluru")
+        m, b1, b2 = (risk["results"][k] for k in ("model", "baseline_28day_mean", "baseline_28day_mean_x_weekday"))
+        table([{"who": "WasteWise model", "dev": f"{m['poisson_deviance']:.3f}", "mae": f"{m['mae']:.3f}",
+                "top": f"{m['top20_hit_rate'] * 100:.0f}%"},
+               {"who": "Ward's 28-day average", "dev": f"{b1['poisson_deviance']:.3f}", "mae": f"{b1['mae']:.3f}",
+                "top": f"{b1['top20_hit_rate'] * 100:.0f}%"},
+               {"who": "28-day average x weekday", "dev": f"{b2['poisson_deviance']:.3f}", "mae": f"{b2['mae']:.3f}",
+                "top": f"{b2['top20_hit_rate'] * 100:.0f}%"}],
+              [Col("who", "Method"), Col("dev", "Error (Poisson deviance, lower is better)"),
+               Col("mae", "Average error (complaints per ward-day)"), Col("top", "Top-20 wards found")])
+        st.caption(f"{risk['wards']} wards; trained {risk['train']}, tested {risk['test']} "
+                   f"({risk['complaints_in_test']:,} complaints never seen in training). "
+                   f"{risk['deviance_improvement_vs_best_baseline_pct']}% lower error than the best simple rule.")
+
+
 def crews_tab() -> None:
     """Crew performance (last 4 weeks) and the monthly summary for NMMC (PDF and spreadsheet)."""
     from datetime import datetime
@@ -299,9 +344,11 @@ def page() -> None:
     now = db.now() // 600 * 600
     d = _data(db.data_version(c), now)
     t = st.tabs(["Bin sizes", "When bins fill", "Festivals", "Next 7 days", "Savings", "Forecast accuracy",
-                 "Crews & monthly report"])
+                 "Crews & monthly report", "Indian data"])
     with t[6]:
         crews_tab()
+    with t[7]:
+        india_tab()
     with t[0]:
         sizing_tab(d)
     with t[1]:

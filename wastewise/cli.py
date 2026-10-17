@@ -48,6 +48,21 @@ def cmd_refresh(args) -> None:
     print(json.dumps(info, indent=2))
 
 
+def cmd_india(args) -> None:
+    """Real Indian data for the forecaster: BBMP garbage complaints (Bengaluru, 2020-2025) and hourly rain
+    (Open-Meteo) for Sanpada and Bengaluru; measure the weekday / festival / rain effects; test the
+    Bengaluru ward-risk model on 2024-2025."""
+    from . import india_calib, india_data, india_risk
+    print(json.dumps(india_data.download_all(force=args.force), indent=2))
+    cal = india_calib.calibrate(india_risk.OVERFLOW)
+    print("complaints used:", cal["complaints_used"])
+    print("1-3 days after a festival:", cal["festival_any_1_3_days_after"])
+    r = india_risk.evaluate()
+    print(json.dumps({k: v for k, v in r.items() if k != "features"}, indent=2))
+    audit.log(db.connect(), "cli", "india_data_calibrated",
+              {"complaints": cal["complaints_used"], "deviance_gain_pct": r["deviance_improvement_vs_best_baseline_pct"]})
+
+
 def cmd_verify(args) -> None:
     res = audit.verify(db.connect())
     print(json.dumps(res, indent=2))
@@ -66,6 +81,9 @@ def main(argv=None) -> None:
     p.add_argument("--days", type=int, default=180)
     p.add_argument("--user", default="cli")
     p.set_defaults(fn=cmd_refresh)
+    p = sub.add_parser("india-data", help="download BBMP complaints + Open-Meteo rain, calibrate, test")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(fn=cmd_india)
     sub.add_parser("verify-audit").set_defaults(fn=cmd_verify)
     sub.add_parser("platform").set_defaults(fn=lambda a: print(json.dumps(platform_info.detect(), indent=2)))
     args = ap.parse_args(argv)

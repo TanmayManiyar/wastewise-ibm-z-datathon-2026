@@ -166,7 +166,8 @@ def test_real_plan_beats_baseline(plan):
 
 
 def test_verifier_catches_broken_plans(plan, conn):
-    ctx = planner.build_context(conn, NOW_TS - 3600)
+    # same inputs as the plan, including the sensors it did not trust
+    ctx = planner.build_context(conn, NOW_TS - 3600, bad_sensors=set(plan["bad_sensors"]))
     vctx = planner.verify_context(ctx)
     ok = verifier.verify(plan, vctx)
     assert ok["ok"], ok["errors"]

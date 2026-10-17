@@ -51,6 +51,51 @@ def is_monsoon(d: date) -> bool:
     return date(d.year, m1, d1) <= d <= date(d.year, m2, d2)
 
 
+# Navi Mumbai festival -> the Bengaluru festival whose measured after-effect applies (wastewise.india_calib)
+CALIB_NAME = {"Ganeshotsav": "Ganesh Chaturthi", "Navratri": "Dasara / Vijayadashami",
+              "Dussehra": "Dasara / Vijayadashami", "Diwali": "Deepavali", "Gudi Padwa": "Ugadi",
+              "Eid al-Adha": "Bakrid"}
+_AFTER: dict | None = None
+
+
+def _after_factors() -> dict:
+    """Measured from real BBMP garbage complaints (2020-2025): problems rise in the 1-3 days after a
+    festival. Per festival where the 90 % interval is clear of 'no change', else the all-festival
+    average; nothing (1.0) if the calibration has not been run."""
+    global _AFTER
+    if _AFTER is None:
+        _AFTER = {}
+        try:
+            from . import india_calib
+            cal = india_calib.load()
+        except Exception:
+            cal = None
+        if cal:
+            overall = cal["festival_any_1_3_days_after"]
+            _AFTER["*"] = overall["factor"] if overall["clear"] else 1.0
+            for r in cal["festivals"]:
+                if r["effect"] == "1-3 days after" and r["clear"]:
+                    _AFTER[r["festival"]] = r["factor"]
+    return _AFTER
+
+
+def days_after_festival(d: date, horizon: int = 7) -> tuple[int, str | None]:
+    """(days since the last festival ended, its name); (horizon + 1, None) if none recently."""
+    for k in range(1, horizon + 1):
+        f = festival_on(d - timedelta(days=k))
+        if f and not festival_on(d):
+            return k, f[0]
+    return horizon + 1, None
+
+
+def after_festival_multiplier(d: date) -> float:
+    k, name = days_after_festival(d, 3)
+    if name is None:
+        return 1.0
+    a = _after_factors()
+    return a.get(CALIB_NAME.get(name, ""), a.get("*", 1.0))
+
+
 def days_to_next_festival(d: date, horizon: int = 30) -> int:
     for k in range(horizon + 1):
         if festival_on(d + timedelta(days=k)):
