@@ -290,7 +290,7 @@ def network_for(conn, cache_dir: Path | None = None) -> Network:
     g = build_graph(roads, speeds)
     if path.exists():
         z = np.load(path)
-        net = Network(g, list(z["stop_ids"]), z["stop_node"], z["snap_m"], z["time_s"], z["dist_m"], z["preds"])
+        net = Network(g, [str(s) for s in z["stop_ids"]], z["stop_node"], z["snap_m"], z["time_s"], z["dist_m"], z["preds"])
     else:
         net = build_network(stops, speeds, roads)
         np.savez_compressed(path, stop_ids=np.array(net.stop_ids), stop_node=net.stop_node, snap_m=net.snap_m,

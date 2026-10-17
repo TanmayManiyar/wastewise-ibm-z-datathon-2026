@@ -143,6 +143,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at INTEGER NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS beats (
+    bin_id TEXT PRIMARY KEY,
+    vehicle_id TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS synthetic_truth (
     bin_id TEXT NOT NULL,
     ts INTEGER NOT NULL,
@@ -161,6 +165,9 @@ CREATE TABLE IF NOT EXISTS models (
 """
 
 
+_INITIALISED: set[str] = set()
+
+
 def now() -> int:
     return int(time.time())
 
@@ -174,6 +181,9 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
+    if str(path) not in _INITIALISED:
+        init(conn)   # schema changes are additive (CREATE ... IF NOT EXISTS)
+        _INITIALISED.add(str(path))
     return conn
 
 
