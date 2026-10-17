@@ -120,12 +120,17 @@ def allowed_numbers(facts: dict) -> set[str]:
     return {_norm(n) for n in _numbers(json.dumps(facts, ensure_ascii=False))}
 
 
-def check(text: str, facts: dict) -> dict:
+def check(text: str, facts: dict, required: list[str] | None = None) -> dict:
+    """Every figure must come from the facts, and the key figures (required) must be present."""
     allowed = allowed_numbers(facts)
     bad = sorted({n for n in _numbers(text) if _norm(n) not in allowed})
     ids = set(re.findall(r"SNP-\d{3}", json.dumps(facts)))
     bad_ids = sorted(set(re.findall(r"SNP-\d{3}", text)) - ids)
-    return {"ok": not bad and not bad_ids, "unknown_numbers": bad, "unknown_bins": bad_ids,
+    found = {_norm(n) for n in _numbers(text)}
+    missing = [r for r in (required or []) if _norm(str(r)) not in found]
+    echoed = "Use ONLY the facts" in text or "Do not invent" in text
+    return {"ok": not bad and not bad_ids and not missing and not echoed, "unknown_numbers": bad,
+            "unknown_bins": bad_ids, "missing_key_figures": missing, "repeated_instructions": echoed,
             "numbers_checked": len(_numbers(text))}
 
 
@@ -171,17 +176,20 @@ SYSTEM = ("You write short, plain messages for the waste-collection staff of the
           "place or name. Copy times exactly as written (HH:MM). No greetings beyond one short line.")
 
 
-def _generate(conn, prompt: str, facts: dict, fallback: str, use_llm: bool) -> dict:
+def _generate(conn, prompt: str, facts: dict, fallback: str, use_llm: bool, required: list[str]) -> dict:
     if not use_llm:
         return {"text": fallback, "source": "template", "check": None}
     try:
-        text = chat(conn, SYSTEM, prompt)
+        text = chat(conn, SYSTEM, prompt, max_tokens=220)
     except Exception as exc:
         return {"text": fallback, "source": "template", "check": None, "error": f"language model unavailable ({exc})"}
-    chk = check(text, facts)
+    chk = check(text, facts, required)
     if not chk["ok"]:
+        why = ("contained figures not in the plan" if chk["unknown_numbers"] or chk["unknown_bins"] else
+               "repeated its instructions" if chk["repeated_instructions"] else
+               "left out key figures (" + ", ".join(chk["missing_key_figures"]) + ")")
         return {"text": fallback, "source": "template", "check": chk, "rejected": text,
-                "error": "Granite's text contained figures not in the plan - showing the checked template instead"}
+                "error": f"Granite's text {why} - showing the checked template instead"}
     return {"text": text, "source": "Granite", "check": chk}
 
 
@@ -189,7 +197,7 @@ def briefing(conn: sqlite3.Connection, plan: dict, use_llm: bool = True) -> dict
     f = plan_facts(plan)
     prompt = ("Write the pre-shift briefing (at most 120 words, English) for the ward supervisor from these "
               "facts:\n" + json.dumps(f, ensure_ascii=False))
-    return _generate(conn, prompt, f, template_briefing(f), use_llm)
+    return _generate(conn, prompt, f, template_briefing(f), use_llm, [str(f["bins_total"]), f["last_truck_back"]])
 
 
 def driver_message(conn: sqlite3.Connection, plan: dict, vehicle_id: str, lang: str = "en",
@@ -198,7 +206,7 @@ def driver_message(conn: sqlite3.Connection, plan: dict, vehicle_id: str, lang: 
     r = next(x for x in f["routes"] if x["vehicle_id"] == vehicle_id)
     prompt = (f"Write a short message (at most 60 words) in {LANG_NAMES[lang]} for the crew of {r['truck']} from "
               "these facts:\n" + json.dumps(r, ensure_ascii=False))
-    return _generate(conn, prompt, r, template_driver(r, lang), use_llm)
+    return _generate(conn, prompt, r, template_driver(r, lang), use_llm, [str(r["bins"]), r["start"], r["back_by"]])
 
 
 def complaint_place_words(conn: sqlite3.Connection, text: str) -> list[str]:

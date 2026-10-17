@@ -51,8 +51,14 @@ def test_rejected_llm_text_is_replaced(conn, plan, monkeypatch):
     res = llm.briefing(conn, plan)
     assert res["source"] == "template" and res["rejected"] and "999" in res["check"]["unknown_numbers"]
     f = llm.plan_facts(plan)
-    monkeypatch.setattr(llm, "chat", lambda *a, **k: f"Last truck back by {f['last_truck_back']}.")
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: f"{f['bins_total']} bins today; last truck back by {f['last_truck_back']}.")
     assert llm.briefing(conn, plan)["source"] == "Granite"
+    # text without the key figures, or repeating the instructions, is rejected too
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: "I am an assistant designed to help you with your tasks.")
+    r = llm.briefing(conn, plan)
+    assert r["source"] == "template" and r["check"]["missing_key_figures"]
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: llm.SYSTEM)
+    assert llm.briefing(conn, plan)["check"]["repeated_instructions"]
 
 
 # ---------------------------------------------------------------- reports
