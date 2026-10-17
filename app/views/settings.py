@@ -309,6 +309,17 @@ def users_tab() -> None:
     if not can("manage_users"):
         st.info("Only the administrator manages users.")
         return
+    st.markdown("**Sign-in**")
+    s = db.get_settings(c)
+    on = st.toggle("One-click sign-in (no passwords): the sign-in page lists the user types, one click enters",
+                   value=bool(s.get("passwordless_signin", True)),
+                   help="Anyone who can open the app can then enter as any user, including the administrator. "
+                        "Switch it off to require passwords again.")
+    if on != bool(s.get("passwordless_signin", True)):
+        _save_setting("passwordless_signin", on, "one-click sign-in")
+        st.rerun()
+    if on:
+        st.caption("Passwords are not used while this is on (the password settings below apply when it is off).")
     us = auth.users(c)
     vn = {v["id"]: v["name"] for v in db.vehicles(c, active_only=False)}
     table([{"user": u["username"], "name": u["display_name"], "role": auth.ROLES[u["role"]],

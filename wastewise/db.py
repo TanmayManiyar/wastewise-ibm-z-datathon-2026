@@ -337,6 +337,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "landfill_open": "06:00",          # Turbhe landfill gate hours (demonstration values - confirm with NMMC)
     "landfill_close": "22:00",
     "landfill_queue_min": 10.0,        # typical wait at the weighbridge before unloading
+    "passwordless_signin": True,       # one-click sign-in by user type, no passwords (Settings > Users)
     "demo_feed": "auto",               # auto = on in demonstration mode | True | False
 }
 
