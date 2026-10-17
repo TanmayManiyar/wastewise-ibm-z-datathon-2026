@@ -1,0 +1,177 @@
+{
+  "forecast_retest": {
+    "label": "SYNTHETIC demonstration data",
+    "model_id": 3,
+    "model": "gbt",
+    "test_from": "2026-09-12",
+    "test_to": "2026-10-17",
+    "rows": 48688,
+    "model_mae": 3.82,
+    "baseline": "same_hour_last_7_days",
+    "baseline_mae": 4.19,
+    "improvement_pct": 8.8,
+    "share_within_5_points": 0.757,
+    "by_lead": [
+      {
+        "hours_ahead": 0,
+        "model": 3.8,
+        "baseline": 4.19,
+        "n": 6169
+      },
+      {
+        "hours_ahead": 3,
+        "model": 3.8,
+        "baseline": 4.18,
+        "n": 6142
+      },
+      {
+        "hours_ahead": 6,
+        "model": 3.81,
+        "baseline": 4.19,
+        "n": 6112
+      },
+      {
+        "hours_ahead": 9,
+        "model": 3.83,
+        "baseline": 4.2,
+        "n": 6082
+      },
+      {
+        "hours_ahead": 12,
+        "model": 3.83,
+        "baseline": 4.2,
+        "n": 6072
+      },
+      {
+        "hours_ahead": 15,
+        "model": 3.83,
+        "baseline": 4.21,
+        "n": 6069
+      },
+      {
+        "hours_ahead": 18,
+        "model": 3.84,
+        "baseline": 4.18,
+        "n": 6036
+      },
+      {
+        "hours_ahead": 21,
+        "model": 3.83,
+        "baseline": 4.17,
+        "n": 6006
+      }
+    ],
+    "by_site_type": [
+      {
+        "site_type": "bus_stand",
+        "model": 3.47,
+        "baseline": 3.45,
+        "n": 2610
+      },
+      {
+        "site_type": "clinic",
+        "model": 3.44,
+        "baseline": 3.8,
+        "n": 2951
+      },
+      {
+        "site_type": "college",
+        "model": 3.65,
+        "baseline": 4.78,
+        "n": 3222
+      },
+      {
+        "site_type": "eatery",
+        "model": 5.29,
+        "baseline": 5.23,
+        "n": 2427
+      },
+      {
+        "site_type": "gaothan",
+        "model": 4.8,
+        "baseline": 4.91,
+        "n": 2042
+      },
+      {
+        "site_type": "hospital",
+        "model": 3.72,
+        "baseline": 3.86,
+        "n": 4357
+      },
+      {
+        "site_type": "housing",
+        "model": 3.68,
+        "baseline": 3.75,
+        "n": 15399
+      },
+      {
+        "site_type": "school",
+        "model": 3.71,
+        "baseline": 4.6,
+        "n": 11709
+      },
+      {
+        "site_type": "station",
+        "model": 3.74,
+        "baseline": 3.97,
+        "n": 2724
+      },
+      {
+        "site_type": "supermarket",
+        "model": 4.77,
+        "baseline": 5.2,
+        "n": 1247
+      }
+    ]
+  },
+  "state_risk": {
+    "label": "evaluated on SYNTHETIC demonstration data",
+    "days": 14,
+    "state_mae_sensor": 3.98,
+    "state_bias_sensor": 0.33,
+    "state_mae_manual": 17.76,
+    "state_bias_manual": -6.03,
+    "risk_n": 1550,
+    "risk_base_rate": 0.119,
+    "brier_model": 0.0305,
+    "brier_climatology": 0.1046,
+    "calibration": [
+      {
+        "bin": "0.0-0.1",
+        "n": 1309,
+        "predicted": 0.0,
+        "observed": 0.01
+      },
+      {
+        "bin": "0.1-0.3",
+        "n": 48,
+        "predicted": 0.18,
+        "observed": 0.33
+      },
+      {
+        "bin": "0.3-0.5",
+        "n": 32,
+        "predicted": 0.39,
+        "observed": 0.44
+      },
+      {
+        "bin": "0.5-0.7",
+        "n": 22,
+        "predicted": 0.61,
+        "observed": 0.64
+      },
+      {
+        "bin": "0.7-0.9",
+        "n": 25,
+        "predicted": 0.82,
+        "observed": 0.84
+      },
+      {
+        "bin": "0.9-1.0",
+        "n": 114,
+        "predicted": 0.99,
+        "observed": 0.94
+      }
+    ]
+  }
+}
