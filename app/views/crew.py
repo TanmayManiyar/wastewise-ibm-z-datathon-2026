@@ -18,12 +18,24 @@ def _maps_url(lat: float, lon: float) -> str:
     return f"https://www.google.com/maps/dir/?{q}"
 
 
-def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew") -> None:
+def _language(key: str) -> str:
+    """Language picker with one source of truth. Tapping the selected language again must not
+    switch the page back to English (a segmented control returns None when deselected)."""
+    sk, last = f"{key}_lang_sel", f"{key}_lang"
+    st.session_state.setdefault(last, "en")
+    if st.session_state.get(sk) is None:
+        st.session_state[sk] = st.session_state[last]
+    lang = st.segmented_control("Language / भाषा", list(LANGS), format_func=LANGS.get, key=sk) \
+        or st.session_state[last]
+    st.session_state[last] = lang
+    return lang
+
+
+def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew", title: str | None = None) -> None:
     c = conn()
-    lang = st.session_state.get(f"{key}_lang", "en")
-    lang = st.segmented_control("Language / भाषा", list(LANGS), default=lang, format_func=LANGS.get,
-                                key=f"{key}_lang_sel") or "en"
-    st.session_state[f"{key}_lang"] = lang
+    lang = _language(key)
+    if title:
+        st.markdown(f"## {t('title', lang)} · {title.replace('Truck', t('truck', lang)).replace('(small)', t('small', lang))}")
     plan, route = progress.route_for(c, day, vehicle_id)
     if not route:
         st.info(t("no_route", lang))
@@ -67,7 +79,7 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
             return
     n = sum(1 for x in route["stops"][:nxt + 1] if x["kind"] == "bin")
     st.markdown(f"<div class='ww-mid'>{t('next', lang)} · {n} {t('of', lang)} {nbins}</div>"
-                f"<div class='ww-big'>{s['bin_id']}<br>{s['landmark']}</div>"
+                f"<div class='ww-big'>{s['landmark']}</div><div>{s['bin_id']}</div>"
                 f"<div class='ww-mid'>{s['street'] or ''}</div>"
                 f"<div>{t('planned', lang)}: <b>{hhmm(s['arrive_ts'])}</b></div>", unsafe_allow_html=True)
     st.link_button(t("maps", lang), _maps_url(s["lat"], s["lon"]), use_container_width=True, icon=":material/map:")
@@ -100,7 +112,7 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
             if x["kind"] == "bin":
                 k += 1
                 mark = "✅" if st_ == "done" else "⬜"
-                st.write(f"{mark} {k}. {hhmm(x['arrive_ts'])} · {x['bin_id']} {x['landmark']}")
+                st.write(f"{mark} {k}. {hhmm(x['arrive_ts'])} · {x['landmark']}")
             elif x["kind"] == "landfill":
                 st.write(f"{'✅' if st_ == 'done' else '🚛'} {hhmm(x['arrive_ts'])} · {t('landfill', lang)}")
 
@@ -110,10 +122,8 @@ def page() -> None:
     u = user()
     c = conn()
     day = planner.plan_day(c).isoformat()
-    lang = st.session_state.get("crew_lang", "en")
     v = next((x for x in db.vehicles(c, active_only=False) if x["id"] == u["vehicle_id"]), None)
-    st.markdown(f"## {t('title', lang)} · {v['name'] if v else u['vehicle_id']}")
-    render(u["vehicle_id"], day, interactive=True, key="crew")
+    render(u["vehicle_id"], day, interactive=True, key="crew", title=v["name"] if v else u["vehicle_id"])
 
 
 def preview(day) -> None:

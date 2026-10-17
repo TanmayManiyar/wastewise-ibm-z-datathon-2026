@@ -88,9 +88,9 @@ def plan_facts(plan: dict) -> dict:
         routes.append({"truck": r["vehicle_name"], "vehicle_id": r["vehicle_id"], "bins": len(bins),
                        "start": _hm(r["start_ts"]), "back_by": _hm(r["totals"]["end_ts"]),
                        "landfill_trips": r["totals"]["landfill_trips"], "km": r["totals"]["distance_km"],
-                       "first_stop": f"{bins[0]['bin_id']} {bins[0]['landmark']}",
+                       "first_stop": bins[0]["landmark"],
                        "first_stop_time": _hm(bins[0]["arrive_ts"]),
-                       "urgent_stops": [f"{s['bin_id']} {s['landmark']} at {_hm(s['arrive_ts'])}" for s in urgent[:3]]})
+                       "urgent_stops": [f"{s['landmark']} at {_hm(s['arrive_ts'])}" for s in urgent[:3]]})
     k = plan["kpis"]
     return {"date": plan["plan_date"], "plan_id": plan.get("id"), "status": plan.get("status", "draft"),
             "trucks": len(routes), "bins_total": k["bins_served"], "due_left_out": k["due_left_out"],

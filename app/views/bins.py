@@ -3,13 +3,28 @@ from __future__ import annotations
 
 import json
 
-import pandas as pd
 import streamlit as st
 
-from wastewise import beats, complaints, db, planner, risk, roads, state
+from wastewise import area, beats, complaints, db, planner, risk, roads, state
 
 from ui import maps
+from ui.tables import Col, table
 from ui.common import STATUS_WORDS, can, conn, live_refresh, log, mark_seen, synthetic_notice, user, when
+
+
+SITE_LABEL = {s.key: s.label for s in area.SITE_TYPES}
+STATUS_PILL = {"red": ("Full", "red"), "amber": ("Over half", "amber"), "green": ("Fine", "green")}
+BASIS = {"sensor": "sensor", "api": "sensor", "supervisor": "supervisor visit", "crew": "crew report",
+         "complaint": "complaint", "collected": "emptied", "unknown": "no data yet"}
+
+
+def _basis_text(basis: str, ts) -> str:
+    word = BASIS.get(basis.split(" ")[0], basis)
+    return f"{word}, {when(ts)}" if ts else word
+
+
+def bin_label(b: dict) -> str:
+    return f"{b['landmark']} - {b['street'] or ''}"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -21,7 +36,7 @@ def _status(version: int) -> tuple[dict, dict, dict]:
     st_ = state.estimate(c, now, prof)
     fills = {b: s.fill for b, s in st_.items()}
     status = {b: ("red" if f >= 100 else "amber" if f >= 50 else "green") for b, f in fills.items()}
-    basis = {b: f"{s.basis} at {when(s.basis_ts)}" for b, s in st_.items()}
+    basis = {b: _basis_text(s.basis, s.basis_ts) for b, s in st_.items()}
     return fills, status, basis
 
 
@@ -42,29 +57,36 @@ def status_tab() -> None:
     fig = maps.bins_map(bins, status, fills, db.places(c), colour, net, tiles=s.get("map_tiles", "osm"),
                         highlight=st.session_state.get("highlight_bin"))
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
-    st.caption("Centre colour = estimated fill now (red full, amber over half, green fine). Ring = the truck "
-               "whose area (beat) the bin belongs to.")
+    st.caption("Dot colour = how full the bin is now (🔴 full · 🟡 over half · 🟢 fine). Ring colour = the "
+               "truck whose area the bin belongs to.")
+    vname = {k: v["name"] for k, v in vehicles.items()}
+    only = st.segmented_control("Show", ["all", "half", "full"], default="all", key="bins_filter",
+                                format_func={"all": "All bins", "half": "Over half full",
+                                             "full": "Full now"}.get) or "all"
     rows = []
-    for b in bins:
-        rows.append({"Bin": b["id"], "Place": b["landmark"], "Street": b["street"], "Type": b["site_type"],
-                     "Capacity (L)": b["capacity_l"], "Priority": b["priority"], "Sensor": "yes" if b["has_sensor"] else "no",
-                     "Every (days)": b["collect_every_days"], "Fill now": round(fills.get(b["id"], 0)),
-                     "Status": STATUS_WORDS[status[b["id"]]].replace("full at shift start", "full"),
-                     "Based on": basis.get(b["id"]), "Area of": bmap.get(b["id"], "-")})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
-                 column_config={"Fill now": st.column_config.ProgressColumn("Fill now", min_value=0, max_value=120,
-                                                                            format="%d%%")})
+    for b in sorted(bins, key=lambda x: -fills.get(x["id"], 0)):
+        f = fills.get(b["id"], 0)
+        if (only == "half" and f < 50) or (only == "full" and f < 100):
+            continue
+        rows.append({"place": b["landmark"], "street": b["street"], "type": SITE_LABEL.get(b["site_type"], b["site_type"]),
+                     "fill": f, "status": STATUS_PILL[status[b["id"]]], "basis": basis.get(b["id"], ""),
+                     "every": "every day" if b["collect_every_days"] == 1 else f"every {b['collect_every_days']} days",
+                     "area": vname.get(bmap.get(b["id"], ""), "-"), "map": (b["lat"], b["lon"])})
+    table(rows, [Col("place", "Place"), Col("street", "Street"), Col("type", "Type"),
+                 Col("fill", "How full now (estimate)", "bar"), Col("status", "Status", "pill"),
+                 Col("basis", "Based on"), Col("every", "Collected"), Col("area", "Truck area"),
+                 Col("map", "", "map")], max_height=620)
     if can("edit_bins"):
         with st.expander("Enter a reading (supervisor visit)"):
             with st.form("manual_reading", clear_on_submit=True):
                 bid = st.selectbox("Bin", [b["id"] for b in bins], index=None, placeholder="Choose the bin",
-                                   format_func=lambda x: f"{x} {next(b['landmark'] for b in bins if b['id'] == x)}")
+                                   format_func=lambda x: bin_label(next(b for b in bins if b["id"] == x)))
                 f = st.select_slider("How full is it?", [0, 10, 25, 50, 75, 90, 100], value=50)
                 if st.form_submit_button("Save reading") and bid:
                     db.add_reading(c, bid, f, "supervisor", user=user()["username"])
                     log("reading_entered", {"bin_id": bid, "fill": f})
                     mark_seen()
-                    st.success(f"Saved: {bid} {f}% full.")
+                    st.success(f"Saved: {next(b['landmark'] for b in bins if b['id'] == bid)} is {f}% full.")
 
 
 def _index():
@@ -117,18 +139,18 @@ def report_tab() -> None:
                 box.caption("Place words suggested by IBM Granite: " + ", ".join(st.session_state.granite_words)
                             + " - please confirm the bin.")
             choice = box.radio(q, options, index=None, key="complaint_choice",
-                               format_func=lambda x: f"{x} · {by_id[x]['landmark']} · {by_id[x]['street']}")
+                               format_func=lambda x: bin_label(by_id[x]))
             other = box.selectbox("Or pick another bin", [b["id"] for b in bins], index=None,
                                   placeholder="(only if none above is right)", key="complaint_other",
-                                  format_func=lambda x: f"{x} {by_id[x]['landmark']}")
+                                  format_func=lambda x: bin_label(by_id[x]))
             chosen = other or choice
             if box.button("Confirm and save", type="primary", disabled=chosen is None):
-                cid = complaints.record(c, text, chosen, und, user()["username"], reporter or None)
+                complaints.record(c, text, chosen, und, user()["username"], reporter or None)
                 st.session_state.pop("understood", None)
                 st.session_state.highlight_bin = chosen
                 mark_seen()
-                st.success(f"Complaint #{cid} saved for {chosen}. The bin now shows as full on all screens; "
-                           "the control room sees it in Live alerts.")
+                st.success(f"Saved for {by_id[chosen]['landmark']}. The bin now shows as full on every screen "
+                           "and the control room sees it under Live alerts.")
     st.subheader("Complaint register")
     flt = st.segmented_control("Show", ["new", "open", "resolved", "all"], default="open", key="compl_filter",
                                format_func={"new": "new (place to confirm)", "open": "open", "resolved": "resolved",
@@ -138,27 +160,43 @@ def report_tab() -> None:
     if not rows:
         st.info("No complaints.")
         return
-    df = pd.DataFrame([{"#": r["id"], "When": when(r["ts"]), "Bin": r["bin_id"] or "?",
-                        "Place": by_id[r["bin_id"]]["landmark"] if r["bin_id"] in by_id else "-",
-                        "Problem": complaints.PROBLEM_WORDS.get(r["problem"], r["problem"]), "Text": r["text"],
-                        "Language": r["lang"], "Status": r["status"],
-                        "Moved from": r["original_bin_id"] or "", "Demo": "synthetic" if r["synthetic"] else ""}
-                       for r in rows])
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    lang = {"en": "English", "hi": "Hindi", "mr": "Marathi", "mixed": "mixed"}
+    status_pill = {"new": ("Place to confirm", "orange"), "open": ("Open", "red"), "resolved": ("Resolved", "green")}
+
+    def place(r):
+        if r["bin_id"] not in by_id:
+            return "place not confirmed yet"
+        p = by_id[r["bin_id"]]["landmark"]
+        if r["original_bin_id"] and r["original_bin_id"] in by_id:
+            p += f" (first filed at {by_id[r['original_bin_id']]['landmark']})"
+        return p
+
+    table([{"when": when(r["ts"]), "place": place(r),
+            "problem": complaints.PROBLEM_WORDS.get(r["problem"], r["problem"] or "other"),
+            "text": r["text"], "lang": lang.get(r["lang"], r["lang"] or ""), "status": status_pill.get(r["status"]),
+            "demo": "demo data" if r["synthetic"] else ""} for r in rows],
+          [Col("when", "When"), Col("place", "Place"), Col("problem", "Problem"), Col("text", "What was said"),
+           Col("lang", "Language"), Col("status", "Status", "pill"), Col("demo", "")], max_height=480)
+
+    def label(cid):
+        r = next(x for x in rows if x["id"] == cid)
+        return f"{when(r['ts'])} · {place(r)} · {complaints.PROBLEM_WORDS.get(r['problem'], r['problem'] or 'other')}"
+
     if can("complaints"):
         open_ids = [r["id"] for r in rows if r["status"] == "open"]
         col1, col2 = st.columns(2)
         with col1.form("resolve"):
-            cid = st.selectbox("Mark as resolved", open_ids, index=None, placeholder="complaint #")
+            cid = st.selectbox("Mark as resolved", open_ids, index=None, placeholder="choose the complaint",
+                               format_func=label)
             if st.form_submit_button("Resolve") and cid:
                 complaints.resolve(c, cid, user()["username"])
                 mark_seen()
                 st.rerun()
         with col2.form("move"):
             cid = st.selectbox("Move a report to the right bin", [r["id"] for r in rows], index=None,
-                               placeholder="complaint #")
-            nb = st.selectbox("Right bin", [b["id"] for b in bins], index=None, placeholder="bin",
-                              format_func=lambda x: f"{x} {by_id[x]['landmark']}")
+                               placeholder="choose the complaint", format_func=label)
+            nb = st.selectbox("Right bin", [b["id"] for b in bins], index=None, placeholder="choose the bin",
+                              format_func=lambda x: bin_label(by_id[x]))
             if st.form_submit_button("Move (original kept)") and cid and nb:
                 complaints.move(c, cid, nb, user()["username"])
                 mark_seen()

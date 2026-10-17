@@ -10,6 +10,10 @@ sys.path.insert(0, str(APP.parent))
 
 import streamlit as st  # noqa: E402
 
+from ui.compat import patch_plotly  # noqa: E402
+
+patch_plotly()   # IBM LinuxONE is big-endian: send chart data to the browser as little-endian
+
 st.set_page_config(page_title="WasteWise · Sanpada", page_icon=":material/recycling:", layout="wide",
                    initial_sidebar_state="auto")
 

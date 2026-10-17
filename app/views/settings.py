@@ -3,16 +3,37 @@ from __future__ import annotations
 
 import json
 
-import pandas as pd
 import streamlit as st
 
 from wastewise import (audit, auth, beats, db, forecast, mildura, osm, platform_info, roads, synth, telum)
 
 from ui.common import can, conn, mark_seen, user, when
+from ui.tables import Col, maps_url, table
+
+from wastewise import area as _area
+
+SITE_LABEL = {x.key: x.label for x in _area.SITE_TYPES}
+
+
+def _detail_text(detail: str) -> str:
+    try:
+        d = json.loads(detail)
+    except ValueError:
+        return detail[:120]
+    skip = {"rows", "stats", "info", "vehicles"}
+    parts = [f"{k.replace('_', ' ')}: {v}" for k, v in d.items() if k not in skip and not isinstance(v, (dict, list))]
+    return ", ".join(parts)[:140]
+
 
 # Truck colours must never look like fill-status colours (red / orange / amber / green).
 TRUCK_COLOURS = {"#2563EB": "blue", "#7C3AED": "purple", "#0D9488": "teal", "#1E3A8A": "navy",
                  "#DB2777": "pink", "#4B5563": "grey"}
+
+ROAD_NAMES = {"motorway": "Expressway", "trunk": "Highway", "primary": "Main road", "secondary": "Secondary road",
+              "tertiary": "Local main road", "unclassified": "Minor road", "residential": "Residential street",
+              "living_street": "Shared street", "service": "Service lane", "road": "Other road",
+              "link": "Ramp / slip road"}
+IMPORTANCE = {1: "High (hospital, school, station...)", 2: "Medium", 3: "Low"}
 
 
 def _save_setting(key, value, label):
@@ -73,42 +94,65 @@ def settings_tab() -> None:
                         c.execute("UPDATE places SET unload_min=? WHERE kind='landfill'", (unload,))
                         audit.log(c, user()["username"], "landfill_unload_changed", {"minutes": unload})
                 mark_seen()
-        with st.expander("Truck speeds by road type (km/h)"):
-            sp = pd.DataFrame([{"road type": k, "km/h": v} for k, v in s["speeds_kmh"].items()])
-            ed = st.data_editor(sp, hide_index=True, disabled=["road type"], key="speeds")
-            if st.button("Save speeds"):
-                _save_setting("speeds_kmh", {r["road type"]: float(r["km/h"]) for _, r in ed.iterrows()}, "speeds")
+        with st.expander("Typical truck speed on each kind of road"):
+            with st.form("speeds"):
+                cols = st.columns(3)
+                new = {}
+                for i, (k, v) in enumerate(s["speeds_kmh"].items()):
+                    new[k] = cols[i % 3].number_input(f"{ROAD_NAMES.get(k, k)} (km/h)", 3.0, 80.0, float(v), 1.0,
+                                                      key=f"spd_{k}")
+                if st.form_submit_button("Save speeds"):
+                    _save_setting("speeds_kmh", new, "speeds")
 
     if can("edit_bins"):
         st.markdown("**Bin register**")
         bins = db.bins(c, active_only=False)
-        df = pd.DataFrame(bins)[["id", "landmark", "street", "site_type", "capacity_l", "priority", "has_sensor",
-                                 "active", "collect_every_days"]]
-        ed = st.data_editor(df, hide_index=True, disabled=["id"], key="bins_editor", use_container_width=True,
-                            column_config={"has_sensor": st.column_config.CheckboxColumn("sensor"),
-                                           "active": st.column_config.CheckboxColumn("active"),
-                                           "priority": st.column_config.NumberColumn(min_value=1, max_value=3, step=1),
-                                           "collect_every_days": st.column_config.NumberColumn("every (days)",
-                                                                                               min_value=1, max_value=7),
-                                           "capacity_l": st.column_config.NumberColumn("capacity (L)", min_value=60,
-                                                                                       max_value=10000, step=60)})
-        if st.button("Save bin register"):
-            changes = 0
-            with db.tx(c):
-                for (_, new), old in zip(ed.iterrows(), bins):
-                    diff = {k: new[k] for k in ("landmark", "street", "site_type", "capacity_l", "priority",
-                                                "has_sensor", "active", "collect_every_days")
-                            if str(new[k]) != str(old[k])}
+        table([{"place": b["landmark"], "street": b["street"], "type": SITE_LABEL.get(b["site_type"], b["site_type"]),
+                "size": f"{b['capacity_l']:,} L", "imp": IMPORTANCE[b["priority"]].split(" (")[0],
+                "sensor": "yes" if b["has_sensor"] else "no",
+                "every": "every day" if b["collect_every_days"] == 1 else f"every {b['collect_every_days']} days",
+                "use": ("In use", "green") if b["active"] else ("Not in use", "grey"), "map": (b["lat"], b["lon"])}
+               for b in bins],
+              [Col("place", "Place"), Col("street", "Street"), Col("type", "Type"), Col("size", "Size"),
+               Col("imp", "Importance"), Col("sensor", "Sensor"), Col("every", "Collected"),
+               Col("use", "", "pill"), Col("map", "", "map")], max_height=380)
+        by_id = {b["id"]: b for b in bins}
+        bid = st.selectbox("Change a bin", list(by_id), index=None, placeholder="choose the bin to change",
+                           format_func=lambda x: f"{by_id[x]['landmark']} - {by_id[x]['street'] or ''}")
+        if bid:
+            b = by_id[bid]
+            with st.form(f"bin_{bid}"):
+                a1, a2 = st.columns(2)
+                landmark = a1.text_input("Place name", b["landmark"])
+                street = a2.text_input("Street", b["street"] or "")
+                a1, a2, a3 = st.columns(3)
+                stype = a1.selectbox("Type", list(SITE_LABEL), index=list(SITE_LABEL).index(b["site_type"])
+                                     if b["site_type"] in SITE_LABEL else 0, format_func=SITE_LABEL.get)
+                cap = a2.select_slider("Size (litres)", [120, 240, 360, 660, 1100, 2400, 4500],
+                                       value=b["capacity_l"] if b["capacity_l"] in (120, 240, 360, 660, 1100, 2400, 4500)
+                                       else 1100)
+                prio = a3.radio("Importance", [1, 2, 3], index=b["priority"] - 1, format_func=IMPORTANCE.get)
+                a1, a2, a3 = st.columns(3)
+                every = a1.selectbox("Collect", [1, 2, 3, 7], index=[1, 2, 3, 7].index(b["collect_every_days"])
+                                     if b["collect_every_days"] in (1, 2, 3, 7) else 0,
+                                     format_func=lambda d: "every day" if d == 1 else f"every {d} days")
+                sensor = a2.checkbox("Has a fill sensor", bool(b["has_sensor"]))
+                active = a3.checkbox("In use", bool(b["active"]))
+                if st.form_submit_button("Save this bin", type="primary"):
+                    new = {"landmark": landmark, "street": street, "site_type": stype, "capacity_l": int(cap),
+                           "priority": int(prio), "collect_every_days": int(every), "has_sensor": int(sensor),
+                           "active": int(active)}
+                    diff = {k: v for k, v in new.items() if str(v) != str(b[k])}
                     if diff:
-                        sets = ", ".join(f"{k}=?" for k in diff)
-                        vals = [int(v) if isinstance(v, (bool,)) else (v.item() if hasattr(v, "item") else v)
-                                for v in diff.values()]
-                        c.execute(f"UPDATE bins SET {sets} WHERE id=?", (*vals, old["id"]))
-                        audit.log(c, user()["username"], "bin_changed", {"bin_id": old["id"], **{k: str(v) for k, v in diff.items()}})
-                        changes += 1
-                db.bump_version(c)
-            mark_seen()
-            st.success(f"{changes} bin(s) updated.")
+                        with db.tx(c):
+                            c.execute(f"UPDATE bins SET {', '.join(f'{k}=?' for k in diff)} WHERE id=?",
+                                      (*diff.values(), bid))
+                            audit.log(c, user()["username"], "bin_changed", {"bin_id": bid, **diff})
+                            db.bump_version(c)
+                        mark_seen()
+                        st.success(f"Saved {landmark}.")
+                    else:
+                        st.info("Nothing changed.")
 
     if can("settings"):
         st.markdown("**Data**")
@@ -141,9 +185,10 @@ def settings_tab() -> None:
                 f"{'Intact' if r['ok'] else 'TAMPERED'}: {r['checked']} entries checked"
                 + ("" if r["ok"] else f", first bad entry #{r['first_bad_id']}"))
         rec = audit.recent(c, 100)
-        st.dataframe(pd.DataFrame([{"#": r["id"], "When": when(r["ts"]), "Who": r["user"], "What": r["action"],
-                                    "Details": r["detail"][:160]} for r in rec]), hide_index=True,
-                     use_container_width=True, height=260)
+        table([{"when": when(r["ts"]), "who": r["user"] or "system", "what": r["action"].replace("_", " "),
+                "detail": _detail_text(r["detail"])} for r in rec],
+              [Col("when", "When"), Col("who", "Who"), Col("what", "What happened"), Col("detail", "Details")],
+              max_height=320)
 
 
 def fleet_tab() -> None:
@@ -151,31 +196,43 @@ def fleet_tab() -> None:
     if not can("edit_fleet"):
         st.info("Only the administrator changes trucks and the depot.")
     vs = db.vehicles(c, active_only=False)
-    df = pd.DataFrame(vs)[["id", "name", "capacity_l", "color", "active"]]
-    ed = st.data_editor(df, hide_index=True, disabled=["id"] if can("edit_fleet") else True, key="fleet",
-                        column_config={"color": st.column_config.SelectboxColumn("colour", options=list(TRUCK_COLOURS)),
-                                       "active": st.column_config.CheckboxColumn("in service"),
-                                       "capacity_l": st.column_config.NumberColumn("capacity (L)", min_value=1000,
-                                                                                   max_value=30000, step=500)})
-    if can("edit_fleet") and st.button("Save trucks"):
-        with db.tx(c):
-            for _, r in ed.iterrows():
-                c.execute("UPDATE vehicles SET name=?, capacity_l=?, color=?, active=? WHERE id=?",
-                          (r["name"], int(r["capacity_l"]), r["color"], int(bool(r["active"])), r["id"]))
-            audit.log(c, user()["username"], "fleet_changed", {"vehicles": ed.to_dict("records")})
-            db.bump_version(c)
-        mark_seen()
-        st.success("Trucks saved.")
+    table([{"name": v["name"], "size": f"{v['capacity_l']:,} L", "colour": TRUCK_COLOURS.get(v["color"], v["color"]),
+            "use": ("In service", "green") if v["active"] else ("Out of service", "grey")} for v in vs],
+          [Col("name", "Truck"), Col("size", "Carries"), Col("colour", "Colour on the map"), Col("use", "", "pill")])
+    if can("edit_fleet"):
+        vid = st.selectbox("Change a truck", [v["id"] for v in vs], index=None, placeholder="choose the truck",
+                           format_func=lambda x: next(v["name"] for v in vs if v["id"] == x))
+        if vid:
+            v = next(x for x in vs if x["id"] == vid)
+            with st.form(f"truck_{vid}"):
+                a1, a2, a3, a4 = st.columns(4)
+                name = a1.text_input("Name", v["name"])
+                cap = a2.number_input("Carries (litres)", 1000, 30000, int(v["capacity_l"]), 500)
+                colour = a3.selectbox("Colour", list(TRUCK_COLOURS), index=list(TRUCK_COLOURS).index(v["color"])
+                                      if v["color"] in TRUCK_COLOURS else 0, format_func=TRUCK_COLOURS.get)
+                active = a4.checkbox("In service", bool(v["active"]))
+                if st.form_submit_button("Save this truck", type="primary"):
+                    with db.tx(c):
+                        c.execute("UPDATE vehicles SET name=?, capacity_l=?, color=?, active=? WHERE id=?",
+                                  (name, int(cap), colour, int(active), vid))
+                        audit.log(c, user()["username"], "fleet_changed",
+                                  {"vehicle": vid, "name": name, "capacity_l": int(cap), "active": active})
+                        db.bump_version(c)
+                    mark_seen()
+                    st.success(f"Saved {name}.")
     p = db.places(c)
     st.markdown("**Depot and landfill**")
     for kind in ("depot", "landfill"):
         x = p[kind]
-        st.write(f"**{x['name']}** · {x['lat']:.5f}, {x['lon']:.5f}  \n{x['note']}")
+        st.markdown(f"**{x['name']}** · <a href='{maps_url(x['lat'], x['lon'])}' target='_blank'>📍 Map</a>  \n"
+                    f"{x['note']}", unsafe_allow_html=True)
     if can("edit_fleet"):
         with st.form("depot"):
             a, b = st.columns(2)
-            lat = a.number_input("Depot latitude", 18.9, 19.2, float(p["depot"]["lat"]), 0.0001, format="%.5f")
-            lon = b.number_input("Depot longitude", 72.9, 73.2, float(p["depot"]["lon"]), 0.0001, format="%.5f")
+            st.caption("Move the depot: copy its position from Google Maps (right-click the place → the first line "
+                       "shows the two numbers).")
+            lat = a.number_input("Latitude (first number)", 18.9, 19.2, float(p["depot"]["lat"]), 0.0001, format="%.5f")
+            lon = b.number_input("Longitude (second number)", 72.9, 73.2, float(p["depot"]["lon"]), 0.0001, format="%.5f")
             name = st.text_input("Depot name", p["depot"]["name"])
             if st.form_submit_button("Save depot"):
                 with db.tx(c):
@@ -198,8 +255,10 @@ def fleet_tab() -> None:
             st.success("Areas recomputed.")
         bm = beats.load(c)
         if bm:
-            counts = pd.Series(bm).value_counts()
-            st.write(" · ".join(f"{v}: {n} bins" for v, n in counts.items()))
+            from collections import Counter
+            counts = dict(Counter(bm.values()).most_common())
+            names = {v["id"]: v["name"] for v in db.vehicles(c, active_only=False)}
+            st.write(" · ".join(f"{names.get(v, v)}: {n} bins" for v, n in counts.items()))
 
 
 def users_tab() -> None:
@@ -208,9 +267,12 @@ def users_tab() -> None:
         st.info("Only the administrator manages users.")
         return
     us = auth.users(c)
-    st.dataframe(pd.DataFrame([{"User": u["username"], "Name": u["display_name"], "Role": auth.ROLES[u["role"]],
-                                "Truck": u["vehicle_id"] or "", "Active": bool(u["active"])} for u in us]),
-                 hide_index=True, use_container_width=True)
+    vn = {v["id"]: v["name"] for v in db.vehicles(c, active_only=False)}
+    table([{"user": u["username"], "name": u["display_name"], "role": auth.ROLES[u["role"]],
+            "truck": vn.get(u["vehicle_id"], "") if u["vehicle_id"] else "",
+            "active": ("Active", "green") if u["active"] else ("Switched off", "grey")} for u in us],
+          [Col("user", "Sign-in name"), Col("name", "Name"), Col("role", "Role"), Col("truck", "Truck"),
+           Col("active", "", "pill")])
     a, b = st.columns(2)
     with a.form("new_user", clear_on_submit=True):
         st.markdown("**Add a user**")
@@ -251,8 +313,9 @@ def users_tab() -> None:
                     st.success("Changed.")
     st.markdown("**API keys** (for sensors and other systems)")
     keys = db.rows(c, "SELECT id, name, created_at, active FROM api_keys ORDER BY id")
-    st.dataframe(pd.DataFrame([{"#": k["id"], "Name": k["name"], "Created": when(k["created_at"]),
-                                "Active": bool(k["active"])} for k in keys]), hide_index=True)
+    table([{"name": k["name"], "created": when(k["created_at"]),
+            "active": ("Active", "green") if k["active"] else ("Revoked", "grey")} for k in keys],
+          [Col("name", "Key name"), Col("created", "Created"), Col("active", "", "pill")])
     a, b = st.columns(2)
     with a.form("new_key", clear_on_submit=True):
         nm = st.text_input("New key name", placeholder="e.g. sensor gateway")
@@ -260,7 +323,8 @@ def users_tab() -> None:
             k = auth.create_api_key(c, nm, actor=user()["username"])
             st.success(f"Key (shown once, stored only as a hash): `{k}`")
     with b.form("revoke", clear_on_submit=True):
-        kid = st.selectbox("Revoke key", [k["id"] for k in keys if k["active"]], index=None)
+        kid = st.selectbox("Revoke key", [k["id"] for k in keys if k["active"]], index=None,
+                           format_func=lambda i: next(k["name"] for k in keys if k["id"] == i))
         if st.form_submit_button("Revoke") and kid:
             with db.tx(c):
                 c.execute("UPDATE api_keys SET active=0 WHERE id=?", (kid,))
@@ -271,12 +335,12 @@ def users_tab() -> None:
 def ai_tab() -> None:
     c = conn()
     p = platform_info.detect()
-    st.markdown("**Machine**")
-    st.write(f"Architecture **{p['arch']}** ({p['byteorder']}-endian) · machine type {p['machine_type'] or '-'} "
-             f"{'(' + p['machine_name'] + ')' if p['machine_name'] else ''} · NNPA flag "
-             f"{'yes' if p['nnpa_feature'] else 'no'} · zDNN {p['zdnn'] or 'not installed'} · accelerator usable: "
-             f"**{'yes' if p['nnpa_usable'] else 'no'}**")
-    if not p["is_s390x"]:
+    st.markdown("**This server**")
+    if p["is_s390x"]:
+        st.markdown(f"- IBM LinuxONE ({p['machine_name'] or 'machine type ' + str(p['machine_type'])}), "
+                    f"{p['byteorder']}-endian s390x\n"
+                    f"- Telum on-chip AI accelerator: **{'present and usable' if p['nnpa_usable'] else 'present but not usable (zDNN missing)' if p['telum'] else 'not present'}**")
+    else:
         st.info("This is not an IBM LinuxONE machine, so there is no Telum accelerator here. The same code uses it "
                 "automatically on IBM z16 / z17 (LinuxONE 4 / 5).")
     s = db.get_settings(c)
@@ -294,7 +358,10 @@ def ai_tab() -> None:
             cache = forecast._inference_model(c)
             eng = cache.get("engine") if cache else None
             if eng:
-                st.write(f"In use: **{eng.device}**" + (f" · measured at load: {eng.timings_ms}" if eng.timings_ms else ""))
+                t_ = eng.timings_ms or {}
+                st.write(f"In use: **{eng.device}**" + (
+                    f" - measured on this server: CPU {t_['cpu']:.2f} ms, accelerator {t_['accelerator']:.2f} ms "
+                    f"for one planning run, so the faster one is used." if t_ else ""))
                 st.session_state._engine_label = "trees on " + ("Telum" if eng.tree_format == "zdnn_tensors" else "CPU")
             else:
                 st.write(f"In use: native {cur['metrics'].get('gbt_library')} on the CPU"
@@ -303,10 +370,15 @@ def ai_tab() -> None:
             st.warning(f"Could not load the inference engine: {exc}")
     models = db.rows(c, "SELECT id, created_at, name, promoted, metrics FROM models WHERE kind='forecaster' ORDER BY id DESC")
     if models:
-        st.dataframe(pd.DataFrame([{"#": m["id"], "Trained": when(m["created_at"]), "Best": m["name"],
-                                    "Error (3 h)": json.loads(m["metrics"])["decision"]["new_mae"],
-                                    "Best baseline": json.loads(m["metrics"])["decision"]["best_baseline_mae"],
-                                    "Promoted": bool(m["promoted"])} for m in models]), hide_index=True)
+        rows = []
+        for m in models:
+            d = json.loads(m["metrics"])["decision"]
+            rows.append({"trained": when(m["created_at"]), "err": f"{d['new_mae']:.1f}% of the bin",
+                         "base": f"{d['best_baseline_mae']:.1f}% of the bin",
+                         "gain": f"{(1 - d['new_mae'] / d['best_baseline_mae']) * 100:.0f}% better",
+                         "use": ("In use", "green") if m["promoted"] else ("Not used", "grey")})
+        table(rows, [Col("trained", "Trained"), Col("err", "Average forecast error (per 3 hours)"),
+                     Col("base", "Simple rule's error"), Col("gain", "AI vs simple rule"), Col("use", "", "pill")])
     if can("settings") and st.button("Train the forecaster now", help="Trains on the history, tests on the locked "
                                      "test window and promotes the new model only if it is more accurate."):
         with st.spinner("Training (about 30 seconds) ..."):
@@ -319,9 +391,10 @@ def ai_tab() -> None:
     st.markdown("**Language model (IBM Granite, local)**")
     from wastewise import llm
     stt = llm.status(c)
-    st.write(f"Server {stt['url']} · model {stt['model']} · "
-             + ("**reachable**" if stt["ok"] else f"not reachable ({stt['error']}) - briefings use the built-in "
-                                                  "templates, which are always available."))
+    model_name = (stt["model"] or "").replace("\\", "/").split("/")[-1]
+    st.write(("**Running on this server**" + (f" ({model_name})" if model_name else "") +
+              ". Every figure it writes is checked against the plan.") if stt["ok"] else
+             "**Not running** - briefings and driver messages use the built-in templates (always correct).")
     if can("settings"):
         with st.form("llm"):
             url = st.text_input("Local llama.cpp server", s.get("llm_url", llm.DEFAULT_URL))

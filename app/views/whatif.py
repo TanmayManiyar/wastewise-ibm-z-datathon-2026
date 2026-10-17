@@ -1,19 +1,23 @@
 """What-if planning: truck breakdown, festival / market rush in an area, extra truck. Compare and adopt."""
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
 from wastewise import audit, db, planner
 
 from ui import maps
-from ui.common import can, conn, hhmm, mark_seen, synthetic_notice, user
+from ui.common import can, conn, duration, hhmm, mark_seen, synthetic_notice, user, vehicle_names
+from ui.tables import Col, table
 
-ROWS = [("bins_served", "Bins collected", "{:.0f}"), ("due_left_out", "Due bins left out", "{:.0f}"),
-        ("distance_km", "Distance (km)", "{:.1f}"), ("fuel_l", "Fuel (L)", "{:.1f}"),
-        ("co2_kg", "CO₂ (kg)", "{:.0f}"), ("expected_overflow_min", "Expected overflow (bin-min)", "{:.0f}"),
-        ("bins_full_on_arrival", "Bins full when the truck arrives", "{:.0f}"),
-        ("landfill_trips", "Landfill trips", "{:.0f}")]
+# key, label, how to show a value, +1 if more is better / -1 if less is better / 0 neutral
+ROWS = [("bins_served", "Bins collected", lambda v: f"{v:.0f} bins", +1),
+        ("due_left_out", "Due bins that do not fit", lambda v: f"{v:.0f} bins", -1),
+        ("distance_km", "Driving", lambda v: f"{v:.0f} km", -1),
+        ("fuel_l", "Diesel", lambda v: f"{v:.0f} L", -1),
+        ("co2_kg", "CO₂", lambda v: f"{v:.0f} kg", -1),
+        ("expected_overflow_min", "Time bins spend overflowing", duration, -1),
+        ("bins_full_on_arrival", "Bins already full when the truck arrives", lambda v: f"{v:.0f} bins", -1),
+        ("landfill_trips", "Landfill trips", lambda v: f"{v:.0f}", 0)]
 
 
 def _run(scenario: dict | None, seconds: float) -> dict:
@@ -24,9 +28,24 @@ def _run(scenario: dict | None, seconds: float) -> dict:
         base = planner.current(c, planner.plan_day(c))
         if not base or base["status"] != "approved":
             raise planner.PlanError("During the shift a what-if starts from the approved plan - approve one first.")
-    p = planner.generate(c, user()["username"], kind="replan" if shift else "daily", scenario=scenario,
-                         seconds=seconds, replan_of=base)
-    return p
+    return planner.generate(c, user()["username"], kind="replan" if shift else "daily", scenario=scenario,
+                            seconds=seconds, replan_of=base)
+
+
+def comparison_rows(normal: dict, what: dict) -> list[dict]:
+    rows = []
+    for key, label, show, better in ROWS:
+        a, b = normal["kpis"][key], what["kpis"][key]
+        if round(b - a, 1) == 0:
+            ch = ("no change", "grey")
+        else:
+            good = (b - a) * better > 0
+            word = "more" if b > a else ("fewer" if "bins" in show(1) else "less")
+            ch = (f"{show(abs(b - a))} {word}", "grey" if better == 0 else ("green" if good else "red"))
+        rows.append({"what": label, "normal": show(a), "whatif": show(b), "change": ch})
+    rows.append({"what": "Last truck back at the depot", "normal": hhmm(normal["kpis"]["finish_ts"]),
+                 "whatif": hhmm(what["kpis"]["finish_ts"]), "change": None})
+    return rows
 
 
 def page() -> None:
@@ -39,25 +58,25 @@ def page() -> None:
     bins = db.bins(c)
     by_id = {b["id"]: b for b in bins}
     vehicles = db.vehicles(c)
+    names = vehicle_names()
     st.write("Try a situation before it happens. WasteWise plans the day with and without it and shows the "
              "difference. Nothing changes until you adopt a plan.")
     with st.form("scenario"):
         col1, col2, col3 = st.columns(3)
         with col1.container(border=True):
-            st.markdown("**Truck breakdown**")
-            broken = st.multiselect("Trucks out of service", [v["id"] for v in vehicles],
-                                    format_func=lambda x: next(v["name"] for v in vehicles if v["id"] == x))
+            st.markdown("**A truck breaks down**")
+            broken = st.multiselect("Trucks out of service", [v["id"] for v in vehicles], format_func=names.get)
         with col2.container(border=True):
-            st.markdown("**Festival / market rush in an area**")
-            centre = st.selectbox("Around bin", list(by_id), index=None, placeholder="no rush",
-                                  format_func=lambda x: f"{x} {by_id[x]['landmark']}")
-            radius = st.slider("Radius (m)", 150, 1000, 400, 50)
-            factor = st.slider("Waste compared with normal", 1.2, 3.0, 1.8, 0.1, format="%.1fx")
+            st.markdown("**Festival or market rush**")
+            centre = st.selectbox("Around", list(by_id), index=None, placeholder="no rush",
+                                  format_func=lambda x: f"{by_id[x]['landmark']} - {by_id[x]['street'] or ''}")
+            radius = st.slider("Area around it (metres)", 150, 1000, 400, 50)
+            factor = st.slider("How much more waste than usual", 1.2, 3.0, 1.8, 0.1, format="%.1f times")
         with col3.container(border=True):
-            st.markdown("**Extra truck**")
+            st.markdown("**An extra truck**")
             extra = st.checkbox("Add a spare truck for the day")
-            extra_cap = st.select_slider("Its capacity (L)", [6000, 9000, 12000], value=6000)
-        seconds = st.slider("Planning time per plan (seconds)", 3, 15, 6)
+            extra_cap = st.select_slider("Its size (litres)", [6000, 9000, 12000], value=6000)
+        seconds = st.slider("Time to search for good routes (seconds per plan)", 3, 15, 6)
         go = st.form_submit_button("Compare", type="primary")
     if go:
         scenario: dict = {}
@@ -73,7 +92,7 @@ def page() -> None:
             st.warning("Choose at least one change.")
             return
         try:
-            with st.spinner("Planning the normal day and the what-if ..."):
+            with st.spinner("Planning a normal day and the situation ..."):
                 normal = _run(None, seconds)
                 what = _run(scenario, seconds)
         except planner.PlanError as exc:
@@ -87,21 +106,17 @@ def page() -> None:
     scenario, normal, what = st.session_state.whatif
     parts = []
     if scenario.get("breakdown"):
-        parts.append("breakdown of " + ", ".join(scenario["breakdown"]))
+        parts.append(", ".join(names.get(v, v) for v in scenario["breakdown"]) + " broken down")
     if scenario.get("surge"):
         s = scenario["surge"]
-        parts.append(f"{s['factor']:.1f}x waste within {s['radius_m']} m of {s['center_bin']}")
+        lm = by_id.get(s["center_bin"], {}).get("landmark", "the chosen place")
+        parts.append(f"{s['factor']:.1f} times the usual waste within {s['radius_m']} m of {lm}")
     if scenario.get("extra_truck"):
-        parts.append(f"spare truck {scenario['extra_truck']['capacity_l']:,} L")
-    st.subheader("What-if: " + "; ".join(parts))
-    rows = []
-    for key, label, fmt in ROWS:
-        a, b = normal["kpis"][key], what["kpis"][key]
-        rows.append({"": label, "Normal plan": fmt.format(a), "What-if plan": fmt.format(b),
-                     "Change": ("+" if b - a > 0 else "") + fmt.format(b - a)})
-    rows.append({"": "Last truck back", "Normal plan": hhmm(normal["kpis"]["finish_ts"]),
-                 "What-if plan": hhmm(what["kpis"]["finish_ts"]), "Change": ""})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        parts.append(f"a spare {scenario['extra_truck']['capacity_l']:,} L truck")
+    st.subheader("What if: " + "; ".join(parts) + "?")
+    table(comparison_rows(normal, what), [Col("what", ""), Col("normal", "Normal day"),
+                                          Col("whatif", "With this situation"), Col("change", "Difference", "pill")])
+    st.caption("Green = better, red = worse than a normal day.")
     for a in what["alerts"]:
         if a["level"] in ("critical", "warning"):
             (st.error if a["level"] == "critical" else st.warning)(f"**{a['text']}**  \nWhat to do: {a['action']}")
@@ -111,11 +126,11 @@ def page() -> None:
                                   height=520), use_container_width=True, config={"displaylogo": False})
     if what.get("label"):
         st.caption("Computed from demonstration (synthetic) data.")
-    if st.button("Adopt the what-if plan as today's draft", type="primary", disabled=not what["verifier"]["ok"]):
+    if st.button("Adopt this plan as today's draft", type="primary", disabled=not what["verifier"]["ok"]):
         what = dict(what, scenario=scenario)
         pid = planner.save(c, what, user()["username"])
         audit.log(c, user()["username"], "whatif_adopted", {"plan_id": pid, "scenario": scenario})
         st.session_state.plan_view = pid
         st.session_state.pop("whatif")
         mark_seen()
-        st.success(f"Saved as draft plan #{pid}. A supervisor approves it under Today's plan.")
+        st.success("Saved as today's draft plan. A supervisor approves it under Today's plan.")

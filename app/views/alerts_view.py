@@ -33,7 +33,7 @@ def tab(day) -> None:
                 opts = a["candidates"] or list(by_id)
                 pick = cols[0].selectbox("Which bin?", opts, index=None, key=f"cn_{a['id']}",
                                          placeholder="choose the bin (nothing is pre-selected)",
-                                         format_func=lambda x: f"{x} {by_id[x]['landmark']}")
+                                         format_func=lambda x: f"{by_id[x]['landmark']} - {by_id[x]['street'] or ''}")
                 if cols[1].button("Confirm", key=f"cnb_{a['id']}", disabled=pick is None, type="primary"):
                     complaints.confirm(c, a["id"], pick, user()["username"])
                     st.session_state.highlight_bin = pick
@@ -60,7 +60,7 @@ def tab(day) -> None:
         cols = st.columns([2, 2, 1])
         kind = cols[0].selectbox("Test event", list(live.TEST_EVENTS), format_func=live.TEST_EVENTS.get)
         bid = cols[1].selectbox("At bin", list(by_id), index=None, placeholder="choose a bin",
-                                format_func=lambda x: f"{x} {by_id[x]['landmark']}")
+                                format_func=lambda x: f"{by_id[x]['landmark']} - {by_id[x]['street'] or ''}")
         if cols[2].button("Inject", disabled=bid is None):
             desc = live.inject(c, kind, bid, user()["username"])
             mark_seen()

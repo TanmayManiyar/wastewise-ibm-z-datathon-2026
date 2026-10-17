@@ -1,13 +1,13 @@
 """Today's plan: Plan · Progress · Live alerts · Briefing & driver messages · Crew phone view."""
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
 from wastewise import db, planner, roads
 
 from ui import maps, sheets
-from ui.common import (LEVEL_ICON, STATUS_WORDS, can, conn, hhmm, live_refresh, log, mark_seen, synthetic_notice,
+from ui.tables import Col, table
+from ui.common import (can, change, conn, duration, hhmm, litres, live_refresh, log, mark_seen, synthetic_notice,
                        today_label, user, when)
 
 
@@ -38,57 +38,97 @@ def _generate(kind: str, base: dict | None = None) -> None:
         pid = planner.save(c, p, u["username"])
         st.session_state.plan_view = pid
         mark_seen()
-        st.toast(f"Plan #{pid} ready (draft). Check it, then approve.", icon=":material/check_circle:")
+        st.toast("New plan ready (draft). Check it, then approve.", icon=":material/check_circle:")
     except planner.PlanError as exc:
         st.error(str(exc))
 
 
+def summary_card(p: dict) -> None:
+    """One sentence that says what today looks like."""
+    k = p["kpis"]
+    trucks = [r for r in p["routes"] if r["totals"]["bins"]]
+    attention = sum(1 for a in p["alerts"] if a["level"] in ("critical", "warning"))
+    left = k["due_left_out"]
+    msg = (f"**{len(trucks)} trucks will collect {k['bins_served']} bins** and be back by "
+           f"**{hhmm(k['finish_ts'])}**. ")
+    msg += (f"**{left} due bin(s) do not fit - an extra trip is needed.** " if left else "All due bins fit. ")
+    msg += (f"{attention} thing(s) need your attention below." if attention else "Nothing needs your attention.")
+    with st.container(border=True):
+        st.markdown(msg)
+
+
 def kpi_row(p: dict) -> None:
     k, b = p["kpis"], p["baseline"]
-    cols = st.columns(6)
-    cols[0].metric("Bins collected", k["bins_served"], f"{k['bins_served'] - b['bins_served']:+d} vs routine",
-                   delta_color="normal")
-    cols[1].metric("Waste", f"{k['litres'] / 1000:.1f} m³")
-    cols[2].metric("Distance", f"{k['distance_km']:.1f} km", f"{k['distance_km'] - b['distance_km']:+.1f} km",
+    over_h, base_h = k["expected_overflow_min"] / 60, b["expected_overflow_min"] / 60
+    cols = st.columns(4)
+    cols[0].metric("Waste to collect", litres(k["litres"]), f"{k['landfill_trips']} landfill trips", delta_color="off")
+    cols[1].metric("Driving", f"{k['distance_km']:.0f} km", change(k["distance_km"], b["distance_km"], "km"),
                    delta_color="inverse")
-    cols[3].metric("Fuel / CO₂", f"{k['fuel_l']:.0f} L / {k['co2_kg']:.0f} kg",
-                   f"{k['co2_kg'] - b['co2_kg']:+.0f} kg CO₂", delta_color="inverse")
-    cols[4].metric("Expected overflow", f"{k['expected_overflow_min']:.0f} bin-min",
-                   f"{k['expected_overflow_min'] - b['expected_overflow_min']:+.0f}", delta_color="inverse")
-    cols[5].metric("Landfill trips", k["landfill_trips"], f"finish {hhmm(k['finish_ts'])}", delta_color="off")
-    st.caption("Deltas compare with the nearest-bin routine on the same day and data"
+    cols[2].metric("Diesel / CO₂", f"{k['fuel_l']:.0f} L · {k['co2_kg']:.0f} kg CO₂",
+                   change(k["co2_kg"], b["co2_kg"], "kg CO₂"), delta_color="inverse")
+    cols[3].metric("Time bins spend overflowing", f"about {duration(k['expected_overflow_min'])}",
+                   (f"{duration(abs(k['expected_overflow_min'] - b['expected_overflow_min']))} "
+                    f"{'less' if over_h <= base_h else 'more'} than the old routine"), delta_color="inverse",
+                   help="Expected total time, over all bins, that a bin is full before its truck arrives.")
+    st.caption("'Old routine' = each truck simply drives to the nearest waiting bin, on the same day and data"
                + (" (demonstration data)." if p.get("label") else "."))
 
 
 def show_alerts(alerts: list[dict]) -> None:
-    for a in alerts:
-        fn = {"critical": st.error, "warning": st.warning}.get(a["level"], st.info)
-        txt = f"**{a['text']}**  \nWhat to do: {a['action']}"
+    """All alerts in one 'Needs attention' box: the three most important first, the rest folded."""
+    important = [a for a in alerts if a["level"] in ("critical", "warning")]
+    info = [a for a in alerts if a["level"] not in ("critical", "warning")]
+    names = {b["id"]: b["landmark"] for b in db.bins(conn(), active_only=False)}
+
+    def line(a):
+        icon = "🔴" if a["level"] == "critical" else "🟠" if a["level"] == "warning" else "ℹ️"
+        places = ""
         if a.get("bins"):
-            txt += f"  \nBins: {', '.join(a['bins'][:12])}"
-        fn(txt, icon=LEVEL_ICON.get(a["level"]))
+            ps = [names.get(b, b) for b in a["bins"][:4]]
+            places = " · " + ", ".join(ps) + (f" and {len(a['bins']) - 4} more" if len(a["bins"]) > 4 else "")
+        return f"{icon} **{a['text']}**{places}  \n&nbsp;&nbsp;&nbsp;&nbsp;→ {a['action']}"
+
+    if not important:
+        st.success("Nothing needs your attention.", icon=":material/check_circle:")
+    else:
+        with st.container(border=True):
+            st.markdown("##### Needs attention")
+            for a in important[:3]:
+                st.markdown(line(a))
+            if len(important) > 3:
+                with st.expander(f"{len(important) - 3} more"):
+                    for a in important[3:]:
+                        st.markdown(line(a))
+    if info:
+        with st.expander("For information"):
+            for a in info:
+                st.markdown(line(a))
 
 
-def route_table(route: dict) -> pd.DataFrame:
+ROUTE_COLS = [Col("n", "Stop"), Col("time", "Time"), Col("place", "Place"), Col("street", "Street"),
+              Col("fill", "How full when the truck arrives", "bar"), Col("status", "Status", "pill"),
+              Col("map", "", "map")]
+STATUS_PILL = {"red": ("Already full", "red"), "orange": ("Full by arrival", "orange"),
+               "amber": ("Over half", "amber"), "green": ("Fine", "green")}
+
+
+def route_rows(route: dict) -> list[dict]:
     rows = []
     n = 0
     for s in route["stops"]:
         if s["kind"] == "bin":
             n += 1
-            rows.append({"#": str(n), "Time": hhmm(s["arrive_ts"]), "Bin": s["bin_id"], "Place": s["landmark"],
-                         "Street": s["street"], "Expected fill": f"{s['expected_fill_pct']:.0f}%",
-                         "Status": STATUS_WORDS[s["status"]], "Pick-up (L)": s["pickup_l"],
-                         "Load after (L)": s["load_after_l"], "Own area": "yes" if s["own_beat"] else "helping"})
+            rows.append({"n": str(n), "time": hhmm(s["arrive_ts"]), "place": s["landmark"], "street": s["street"],
+                         "fill": s["expected_fill_pct"], "status": STATUS_PILL[s["status"]],
+                         "map": (s["lat"], s["lon"]), "kind": "bin"})
         elif s["kind"] == "landfill":
-            rows.append({"#": "", "Time": hhmm(s["arrive_ts"]), "Bin": "LANDFILL", "Place": "Turbhe landfill",
-                         "Street": f"unload {(s['depart_ts'] - s['arrive_ts']) / 60:.0f} min", "Expected fill": "",
-                         "Status": "", "Pick-up (L)": None, "Load after (L)": 0, "Own area": ""})
+            rows.append({"n": "🚛", "time": hhmm(s["arrive_ts"]), "place": "Turbhe landfill - unload",
+                         "street": f"about {duration((s['depart_ts'] - s['arrive_ts']) / 60)}", "fill": None,
+                         "status": ("Unload", "blue"), "map": (s["lat"], s["lon"]), "kind": "landfill"})
         else:
-            rows.append({"#": "", "Time": hhmm(s["arrive_ts"]), "Bin": "DEPOT", "Place": "Back at the depot",
-                         "Street": "", "Expected fill": "", "Status": "", "Pick-up (L)": None,
-                         "Load after (L)": s["load_after_l"], "Own area": ""})
-    return pd.DataFrame(rows)
-
+            rows.append({"n": "🏁", "time": hhmm(s["arrive_ts"]), "place": "Back at the depot", "street": "",
+                         "fill": None, "status": None, "map": None, "kind": "depot"})
+    return rows
 
 def plan_tab(day) -> None:
     c = conn()
@@ -104,7 +144,7 @@ def plan_tab(day) -> None:
     if view_id not in ids:
         view_id = approved["id"] if approved else (ids[0] if ids else None)
     if len(choices) > 1:
-        labels = {r["id"]: f"#{r['id']} {r['status']} {r['kind']} · {when(r['created_at'])}" for r in choices}
+        labels = {r["id"]: f"{r['status'].capitalize()} {'re-plan' if r['kind'] == 'replan' else 'plan'} made {when(r['created_at'])}" for r in choices}
         view_id = st.radio("Plan", ids, index=ids.index(view_id), format_func=labels.get, horizontal=True,
                            key="plan_pick")
         st.session_state.plan_view = view_id
@@ -133,12 +173,11 @@ def plan_tab(day) -> None:
         return
 
     badge = "ww-approved" if p["status"] == "approved" else "ww-draft"
-    st.markdown(
-        f"<span class='ww-badge {badge}'>{p['status'].upper()}</span> &nbsp; Plan #{p['id']} "
-        f"({'re-plan' if p['kind'] == 'replan' else 'daily plan'}) for <b>{today_label(p['plan_date'])}</b> · "
-        f"made {when(p['created_at'])} by {p['created_by']}"
-        + (f" · approved by {p['approved_by']} at {hhmm(p['approved_at'])}" if p.get("approved_by") else "")
-        + f" · forecast: {p['forecast_source']}", unsafe_allow_html=True)
+    who = (f"approved by {p['approved_by']} at {hhmm(p['approved_at'])}" if p.get("approved_by")
+           else "waiting for a supervisor to approve")
+    st.markdown(f"<span class='ww-badge {badge}'>{p['status'].upper()}</span> &nbsp; "
+                f"{'Re-plan' if p['kind'] == 'replan' else 'Plan'} for <b>{today_label(p['plan_date'])}</b> · "
+                f"made at {hhmm(p['created_at'])} by {p['created_by']} · {who}", unsafe_allow_html=True)
 
     n_read, n_comp = _new_since(p)
     if n_read or n_comp:
@@ -149,29 +188,36 @@ def plan_tab(day) -> None:
     if not p["verifier"]["ok"]:
         st.error("This plan failed the independent check and cannot be approved: "
                  + "; ".join(p["verifier"]["errors"][:3]))
+    summary_card(p)
     show_alerts(p["alerts"])
     kpi_row(p)
 
-    vehicles = [r["vehicle_id"] for r in p["routes"]]
+    st.markdown("##### Routes on the map")
+    vehicles = [r["vehicle_id"] for r in p["routes"] if r["totals"]["bins"]]
     names = {r["vehicle_id"]: r["vehicle_name"] for r in p["routes"]}
     sel = st.pills("Show trucks", vehicles, selection_mode="multi", default=vehicles, format_func=names.get,
                    key="truck_pills") or vehicles
     net = roads.network_for(c) if settings.get("map_tiles") == "offline" else None
     fig = maps.plan_map(p, db.places(c), db.bins(c), net, sel, tiles=settings.get("map_tiles", "osm"))
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
-    st.caption("Ring and line = truck colour. Centre: red = full at shift start, orange = full by the time the "
-               "truck arrives, amber = over half full, green = fine. Grey = not in this plan; black = due but "
-               "left out. Numbers are the stop order.")
+    st.caption("Each truck has its own colour (line and ring). The dot in the middle shows how full the bin will "
+               "be: 🔴 already full · 🟠 full by the time the truck arrives · 🟡 over half · 🟢 fine. "
+               "Numbers = stop order. Grey = not in today's plan.")
 
+    st.markdown("##### Each truck's route")
     for r in p["routes"]:
         if r["vehicle_id"] not in sel:
             continue
         t = r["totals"]
-        with st.expander(f"{r['vehicle_name']} · {t['bins']} bins · {t['landfill_trips']} landfill trip(s) · "
-                         f"{t['distance_km']} km · {hhmm(r['start_ts'])}-{hhmm(t['end_ts'])}"
-                         + (f" · helps another area at {t['off_beat_bins']} bin(s)" if t["off_beat_bins"] else ""),
-                         expanded=False):
-            st.dataframe(route_table(r), hide_index=True, use_container_width=True)
+        stops = route_rows(r)
+        full = sum(1 for x in stops if x["kind"] == "bin" and x["status"][1] in ("red", "orange"))
+        title = (f"**{r['vehicle_name']}** · {t['bins']} stops · {t['landfill_trips']} landfill trip(s) · "
+                 f"{t['distance_km']:.0f} km · {hhmm(r['start_ts'])} to {hhmm(t['end_ts'])}")
+        with st.expander(title, expanded=False):
+            st.markdown(f"{full} bin(s) on this route will be full when the truck arrives."
+                        + (f" This truck also helps another area at {t['off_beat_bins']} stop(s)."
+                           if t["off_beat_bins"] else ""))
+            table(stops, ROUTE_COLS, strong=lambda x: x["kind"] != "bin")
             crew = db.one(c, "SELECT display_name FROM users WHERE vehicle_id=? AND role='crew'", (r["vehicle_id"],))
             html = sheets.route_sheet_html(p, r, crew["display_name"] if crew else None)
             if st.download_button("Printable route sheet", html, file_name=f"route_{p['plan_date']}_{r['vehicle_id']}.html",
@@ -179,26 +225,33 @@ def plan_tab(day) -> None:
                                   icon=":material/print:"):
                 log("route_sheet_downloaded", {"plan_id": p["id"], "vehicle": r["vehicle_id"]})
     if p["unserved"]:
-        with st.expander(f"Bins not in this plan ({len(p['unserved'])})"):
-            st.dataframe(pd.DataFrame([{"Bin": u["bin_id"], "Place": u["landmark"], "Due": "yes" if u["due"] else "no",
-                                        "Why": u["reason"], "Expected (L)": u["expected_l"]} for u in p["unserved"]]),
-                         hide_index=True, use_container_width=True)
+        due = [u for u in p["unserved"] if u["due"]]
+        with st.expander(f"Bins not in today's plan ({len(p['unserved'])}" + (f", {len(due)} due" if due else "") + ")"):
+            bins = {b["id"]: b for b in db.bins(c, active_only=False)}
+            table([{"place": u["landmark"], "street": bins.get(u["bin_id"], {}).get("street", ""),
+                    "why": ("Due, but no truck has space or time - send an extra trip" if u["due"]
+                            else "Not due and not full enough today"),
+                    "map": (bins[u["bin_id"]]["lat"], bins[u["bin_id"]]["lon"]) if u["bin_id"] in bins else None}
+                   for u in p["unserved"]],
+                  [Col("place", "Place"), Col("street", "Street"), Col("why", "Why"), Col("map", "", "map")])
     with st.expander("How this plan was checked"):
         v = p["verifier"]
-        st.write(f"Independent verifier: **{'passed' if v['ok'] else 'FAILED'}** · {v['bins_checked']} bins and "
-                 f"{v['routes_checked']} routes re-checked (times, capacity, final unload, shift end, duplicates, "
-                 f"due bins, totals). Recomputed distance {v['distance_km']} km.")
-        for e in v["errors"]:
-            st.write(":material/error:", e)
-        for w in v["warnings"]:
-            st.write(":material/warning:", w)
+        st.markdown(f"- **Independent check: {'passed ✅' if v['ok'] else 'FAILED ❌'}.** A separate program re-checked "
+                    f"all {v['routes_checked']} routes and {v['bins_checked']} stops: arrival times, truck capacity, "
+                    f"the final landfill unload, return before the end of the shift, no bin visited twice, every due "
+                    f"bin served or explained.")
+        for e_ in v["errors"]:
+            st.markdown(f"  - ❌ {e_}")
         s = p["solver"]
-        st.write(f"Optimiser (Adaptive Large Neighbourhood Search): {s['iterations']} iterations in "
-                 f"{s['seconds']} s, cost {s['initial_cost']:.0f} → {s['best_cost']:.0f}. "
-                 f"{p['candidates']} candidate bins ({p['due_bins']} due).")
+        st.markdown(f"- **Route search:** WasteWise tried {s['iterations']:,} variations of the routes in "
+                    f"{s['seconds']:.0f} seconds and kept the best one.")
+        st.markdown(f"- **Fill forecast:** {'AI forecaster' if 'ML' in p['forecast_source'] else 'learned daily pattern'}"
+                    + (" (tree model run on the IBM Telum AI accelerator)" if "Telum" in p["forecast_source"] else "")
+                    + ".")
         if p.get("bad_sensors"):
-            st.write("Sensors not trusted today (faulty/offline):", ", ".join(p["bad_sensors"]))
-
+            bn = {b["id"]: b["landmark"] for b in db.bins(c, active_only=False)}
+            st.markdown("- **Sensors not trusted today** (faulty or offline - their manual readings are used): "
+                        + ", ".join(bn.get(x, x) for x in p["bad_sensors"]))
 
 def page() -> None:
     live_refresh()

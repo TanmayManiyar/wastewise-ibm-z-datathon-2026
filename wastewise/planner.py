@@ -313,17 +313,17 @@ def make_alerts(ctx: Context, plan: dict) -> list[dict]:
         out.append({"level": "critical",
                     "text": f"{len(left)} due bin(s) do not fit: no truck has space or time left "
                             f"(about {litres:,.0f} L).",
-                    "action": f"Send an extra trip or the spare vehicle. Most urgent: {worst['bin_id']} "
-                              f"{worst['landmark']}.",
+                    "action": f"Send an extra trip or the spare vehicle. Most urgent: {worst['landmark']}.",
                     "bins": [u["bin_id"] for u in left]})
     red = [s for r in plan["routes"] for s in r["stops"] if s["kind"] == "bin" and s["status"] == "red"]
     if red:
         red.sort(key=lambda s: s["arrive_ts"])
-        visits = ", ".join(f"{s['bin_id']} {_hhmm(s['arrive_ts'])}" for s in red[:6])
-        out.append({"level": "warning", "text": f"{len(red)} bin(s) are expected to be full already at the start. "
-                                                f"Planned visits: {visits}{' ...' if len(red) > 6 else ''}.",
-                    "action": "Ask the supervisor to check the latest of these; send the spare vehicle if people "
-                              "complain before the planned visit.",
+        last = red[-1]
+        out.append({"level": "warning",
+                    "text": f"{len(red)} bin(s) will already be full when the shift starts. They are visited "
+                            f"between {_hhmm(red[0]['arrive_ts'])} and {_hhmm(last['arrive_ts'])}.",
+                    "action": f"Ask the supervisor to check the last one ({last['landmark']}); send the spare "
+                              "vehicle if people complain before the visit.",
                     "bins": [s["bin_id"] for s in red]})
     waits = sorted((s for r in plan["routes"] for s in r["stops"] if s["kind"] == "bin" and s["overflow_min"] >= 30),
                    key=lambda s: -s["overflow_min"])
@@ -331,7 +331,7 @@ def make_alerts(ctx: Context, plan: dict) -> list[dict]:
         s = waits[0]
         vname = next(r["vehicle_name"] for r in plan["routes"] if s in r["stops"])
         out.append({"level": "warning",
-                    "text": f"Longest wait: {s['bin_id']} {s['landmark']} is expected to overflow for about "
+                    "text": f"Longest wait: {s['landmark']} will probably overflow for about "
                             f"{s['overflow_min']:.0f} min before {vname} arrives at {_hhmm(s['arrive_ts'])}.",
                     "action": "If people complain, send the spare vehicle or ask a crew to come earlier.",
                     "bins": [w["bin_id"] for w in waits[:5]]})

@@ -12,6 +12,14 @@ from datetime import datetime
 from . import anomaly, audit, complaints, config, db, planner, progress, state
 
 
+REASON = {"stuck": "it has shown the same value for hours", "spike": "it jumps up and down",
+          "jump": "it shows impossible jumps", "no_drop": "it did not drop after the bin was emptied",
+          "unusual pattern (IsolationForest)": "its readings look unusual",
+          "no reading for 6+ hours": "no reading for over 6 hours"}
+STATUS_TEXT = {"could_not_reach": "could not reach the bin", "bin_missing": "bin missing",
+               "overdue": "not collected yet, overdue", "late": "collected late"}
+
+
 def _hm(ts) -> str:
     return datetime.fromtimestamp(ts, config.IST).strftime("%H:%M") if ts else "-"
 
@@ -24,17 +32,18 @@ def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
     # Complaints waiting for a place confirmation, and open urgent ones.
     for c in db.rows(conn, "SELECT * FROM complaints WHERE status='new' ORDER BY ts DESC LIMIT 20"):
         p = json.loads(c["parsed"] or "{}")
-        cands = ", ".join(f"{x['bin_id']} {x['landmark']}" for x in p.get("candidates", [])[:3]) or "place not recognised"
+        cands = " or ".join(x["landmark"] for x in p.get("candidates", [])[:3]) or "place not recognised"
+        lang = {"en": "English", "hi": "Hindi", "mr": "Marathi", "mixed": "mixed language"}.get(c["lang"], c["lang"])
         out.append({"level": "critical" if p.get("urgent") else "warning", "kind": "complaint_new", "ts": c["ts"],
-                    "id": c["id"], "text": f"New complaint ({c['lang']}): “{c['text']}”",
-                    "action": f"Confirm the place ({cands}) under Bins > Report a problem or below.",
+                    "id": c["id"], "text": f"New complaint in {lang}: “{c['text']}”",
+                    "action": f"Probably {cands} - confirm the bin below.",
                     "candidates": [x["bin_id"] for x in p.get("candidates", [])]})
     for c in db.rows(conn, "SELECT * FROM complaints WHERE status='open' AND ts>=? ORDER BY ts DESC LIMIT 20",
                      (now_ts - 86400,)):
         urgent = c["problem"] in complaints.URGENT
         b = bins.get(c["bin_id"], {})
         out.append({"level": "critical" if urgent else "warning", "kind": "complaint", "ts": c["ts"], "id": c["id"],
-                    "text": f"Complaint at {c['bin_id']} {b.get('landmark', '')}: "
+                    "text": f"Complaint at {b.get('landmark', 'an unconfirmed place')}: "
                             f"{complaints.PROBLEM_WORDS.get(c['problem'], c['problem'])} (since {_hm(c['ts'])})",
                     "action": "Send the nearest crew now - fire or dead animal is a health risk." if urgent else
                               "Bin now shows as full; check its planned visit or Re-plan from now."})
@@ -42,19 +51,19 @@ def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
     for bid, h in anomaly.sensor_health(conn, now_ts).items():
         if h["status"] != "ok":
             out.append({"level": "warning", "kind": "sensor", "ts": h["last_reading_ts"] or now_ts,
-                        "text": f"Sensor at {bid} {bins[bid]['landmark']} is {h['status']}: {', '.join(h['reasons'])}.",
+                        "text": f"The sensor at {bins[bid]['landmark']} is {h['status']}: {', '.join(REASON.get(x, x) for x in h['reasons'])}.",
                         "action": "Planning ignores this sensor; ask the supervisor to check the bin and the sensor."})
     for s in anomaly.surges(conn, now_ts):
         out.append({"level": "warning", "kind": "surge", "ts": s["since_ts"],
-                    "text": f"Surge at {s['bin_id']} {s['landmark']}: +{s['observed_rise']:.0f} points in the last hours, "
-                            f"{s['ratio']}x the normal pattern.",
+                    "text": f"{s['landmark']} is filling unusually fast: it rose by {s['observed_rise']:.0f}% of the bin "
+                            f"in the last hours, {s['ratio']:.1f} times faster than normal.",
                     "action": "Possible event or market rush - consider Re-plan from now or the What-if 'rush' scenario."})
     # Crew exceptions on today's plan.
     for r in progress.status_rows(conn, day, now_ts):
         if r["status"] in ("could_not_reach", "bin_missing", "overdue", "late"):
             out.append({"level": "warning" if r["status"] in ("late", "overdue") else "critical", "kind": "progress",
                         "ts": r["actual_ts"] or now_ts,
-                        "text": f"{r['vehicle_name']} · {r['bin_id']} {r['landmark']}: {r['status'].replace('_', ' ')}"
+                        "text": f"{r['vehicle_name']} at {r['landmark']}: {STATUS_TEXT[r['status']]}"
                                 + (f" ({r['delay_min']} min)" if r["delay_min"] else ""),
                         "action": r["action"]})
     order = {"critical": 0, "warning": 1, "info": 2}

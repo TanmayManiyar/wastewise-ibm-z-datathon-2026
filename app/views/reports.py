@@ -1,16 +1,33 @@
-"""Reports: bin sizing, patterns, festival effect, 7-day outlook, savings vs routine, forecast accuracy."""
+"""Reports in plain words: bin sizing, when bins fill, festivals, next 7 days, savings, forecast accuracy."""
 from __future__ import annotations
 
-import pandas as pd
-import plotly.express as px
+import sys
+from datetime import datetime
+from pathlib import Path
+
 import plotly.graph_objects as go
 import streamlit as st
 
-from wastewise import calendar_in, db, reports
+from wastewise import area, db, forecast, reports
 
-from ui.common import conn, synthetic_notice
+from ui.common import can, conn, synthetic_notice
+from ui.tables import Col, table
 
-DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+SITE_LABEL = {s.key: s.label for s in area.SITE_TYPES}
+SIZES = [120, 240, 360, 660, 1100, 2400, 4500]
+METHOD = {"gbt": "AI model (LightGBM boosted trees)", "hgb": "AI model (scikit-learn HistGradientBoosting)",
+          "ensemble": "Both AI models averaged", "same_hour_last_7_days": "Simple rule: same hour on recent days",
+          "mean_rate_last_7_days": "Simple rule: last week's average speed",
+          "last_24_hours": "Simple rule: speed of the last 24 hours"}
+
+
+def _day_label(iso: str) -> str:
+    return datetime.strptime(iso, "%Y-%m-%d").strftime("%a %d %b")
+
+
+def _hour(h: int) -> str:
+    return f"{h % 12 or 12} {'am' if h < 12 else 'pm'}"
 
 
 @st.cache_data(ttl=300, show_spinner="Calculating ...")
@@ -22,111 +39,237 @@ def _data(version: int, now: int) -> dict:
             "savings": reports.savings(c), "accuracy": reports.forecast_accuracy(c)}
 
 
+@st.cache_data(ttl=600, show_spinner="Testing the forecast on the held-back days ...")
+def _retest(version: int) -> dict | None:
+    return forecast.evaluate_promoted(db.connect())
+
+
+@st.cache_data(ttl=600, show_spinner="Checking how well WasteWise knew each bin's fill ...")
+def _state_risk(version: int) -> dict | None:
+    root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(root / "scripts"))
+    try:
+        from eval_state_risk import evaluate
+        return evaluate(db.connect(), days=7)
+    except Exception:
+        return None
+
+
+def sizing_tab(d: dict) -> None:
+    rows = [r for r in d["sizing"] if r["collections"] >= 5]
+    small = [r for r in rows if r["recommendation"].startswith("too small")]
+    over = [r for r in rows if r["recommendation"].startswith("over-serviced")]
+    ok = len(rows) - len(small) - len(over)
+    a, b, c = st.columns(3)
+    a.metric("Bins that are too small", len(small))
+    b.metric("Bins collected more often than needed", len(over))
+    c.metric("Bins that are the right size", ok)
+    st.caption("Based on how full the crews found each bin when they emptied it, over the last 4 weeks.")
+    if small:
+        st.markdown("##### Too small - they are often already full when the truck comes")
+
+        def bigger(cap):
+            return next((s for s in SIZES if s > cap), cap * 2)
+        table([{"place": r["landmark"], "type": SITE_LABEL.get(r["site_type"], r["site_type"]),
+                "size": f"{r['capacity_l']:,} L",
+                "full": f"{round(r['share_full_at_collection'] * r['collections'])} of {r['collections']} pickups",
+                "fill": r["mean_fill_at_collection"],
+                "todo": f"Replace with a {bigger(r['capacity_l']):,} L bin, or add a second pickup"}
+               for r in sorted(small, key=lambda r: -r["share_full_at_collection"])],
+              [Col("place", "Place"), Col("type", "Type"), Col("size", "Bin now"), Col("full", "Found full at"),
+               Col("fill", "Usually this full at pickup", "bar"), Col("todo", "What to do")])
+    if over:
+        st.markdown("##### Collected more often than needed")
+        table([{"place": r["landmark"], "type": SITE_LABEL.get(r["site_type"], r["site_type"]),
+                "fill": r["mean_fill_at_collection"],
+                "todo": "Collect every 2 days" if r["every_days"] == 1 else "A smaller bin would do"} for r in over],
+              [Col("place", "Place"), Col("type", "Type"), Col("fill", "Usually this full at pickup", "bar"),
+               Col("todo", "What to do")])
+    elif rows:
+        st.success("No bin is collected more often than it needs.")
+
+
+def patterns_tab(d: dict) -> None:
+    types = sorted(d["patterns"], key=lambda k: SITE_LABEL.get(k, k))
+    default = types.index("housing") if "housing" in types else 0
+    t = st.selectbox("Type of place", types, index=default, format_func=lambda k: SITE_LABEL.get(k, k))
+    z = d["patterns"][t]
+    per_day = [sum(row) for row in z]
+    by_hour = [sum(z[dw][h] for dw in range(7)) / 7 for h in range(24)]
+    peak = max(range(24), key=lambda h: by_hour[h])
+    busiest, quietest = max(range(7), key=lambda i: per_day[i]), min(range(7), key=lambda i: per_day[i])
+    st.markdown(f"**{SITE_LABEL.get(t, t)}:** a bin fills about **{sum(per_day) / 7:.0f}% of its size per day**. "
+                f"Busiest around **{_hour(peak)}**. Busiest day **{DAYS[busiest]}** ({per_day[busiest]:.0f}%), "
+                f"quietest **{DAYS[quietest]}** ({per_day[quietest]:.0f}%).")
+    fig = go.Figure(go.Heatmap(z=z, x=[_hour(h) for h in range(24)], y=DAYS, colorscale="Blues",
+                               colorbar=dict(title="% filled<br>per hour"),
+                               hovertemplate="%{y} %{x}: %{z:.1f}% of the bin per hour<extra></extra>"))
+    fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0), yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.caption("Darker = the bin fills faster at that hour.")
+    rows = []
+    for k in types:
+        pdays = [sum(row) for row in d["patterns"][k]]
+        rows.append({"type": SITE_LABEL.get(k, k), "per_day": f"{sum(pdays) / 7:.0f}% of the bin",
+                     "busy": DAYS[max(range(7), key=lambda i: pdays[i])],
+                     "quiet": DAYS[min(range(7), key=lambda i: pdays[i])]})
+    st.markdown("##### All types of place")
+    table(rows, [Col("type", "Type of place"), Col("per_day", "Fills per day"), Col("busy", "Busiest day"),
+                 Col("quiet", "Quietest day")])
+
+
+def festival_tab(d: dict) -> None:
+    h = d["hist"]
+    if not h:
+        st.info("No collections recorded yet.")
+        return
+    for f in d["fest"]:
+        pct = (f["vs_normal"] - 1) * 100 if f["vs_normal"] else 0
+        st.markdown(f"- **{f['festival']}** ({f['days']} days): **{abs(pct):.0f}% {'more' if pct >= 0 else 'less'}** "
+                    f"waste per day than a normal day ({f['mean_litres']:,} L a day).")
+    fig = go.Figure()
+    normal = [r for r in h if not r["festival"]]
+    fig.add_bar(x=[r["date"] for r in normal], y=[r["litres"] for r in normal], name="normal day",
+                marker_color="#94A3B8")
+    for name in sorted({r["festival"] for r in h if r["festival"]}):
+        sel = [r for r in h if r["festival"] == name]
+        fig.add_bar(x=[r["date"] for r in sel], y=[r["litres"] for r in sel], name=name)
+    fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0), barmode="overlay", yaxis_title="litres collected",
+                      legend=dict(orientation="h"))
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.caption("Litres collected each day. Festival dates are approximate - check against the official holiday list.")
+
+
+def outlook_tab(d: dict) -> None:
+    o = d["outlook"]
+    bad = [x for x in o if x["over_capacity"]]
+    if bad:
+        st.error("The trucks cannot carry everything on: " + ", ".join(_day_label(x["date"]) for x in bad)
+                 + ". Plan an extra truck or a second round on those days.")
+    else:
+        st.success("The trucks can carry the expected waste on each of the next 7 days.")
+    table([{"day": _day_label(x["date"]), "fest": x["festival"] or "", "waste": f"{x['expected_litres']:,} L",
+            "cap": f"{x['fleet_capacity_litres']:,} L",
+            "used": round(100 * x["expected_litres"] / x["fleet_capacity_litres"]),
+            "ok": ("Extra trip needed", "red") if x["over_capacity"] else ("OK", "green")} for x in o],
+          [Col("day", "Day"), Col("fest", "Festival"), Col("waste", "Expected waste"),
+           Col("cap", "Trucks can carry"), Col("used", "How full the trucks will be", "bar"), Col("ok", "", "pill")])
+    st.caption("Expected waste comes from each bin's usual weekly pattern, raised on festival days by the festival "
+               "effect seen in the history. 'Trucks can carry' = all trucks x their usual landfill trips per shift.")
+
+
+def savings_tab(d: dict) -> None:
+    s = d["savings"]
+    if not s["plans"]:
+        st.info("Savings appear once daily plans have been approved.")
+        return
+    t = s["totals"]
+    st.markdown(f"Compared with the old routine (each truck drives to the nearest waiting bin), over "
+                f"**{s['plans']} approved day(s)**" + (" - **demonstration data**:" if s["demonstration"] else ":"))
+    a, b, c, e = st.columns(4)
+    a.metric("Less driving", f"{t['distance_km']['saved']:.0f} km",
+             f"{t['distance_km']['wastewise']:.0f} km instead of {t['distance_km']['routine']:.0f} km", delta_color="off")
+    b.metric("Less diesel", f"{t['fuel_l']['saved']:.0f} L", delta_color="off")
+    c.metric("Less CO₂", f"{t['co2_kg']['saved']:.0f} kg", delta_color="off")
+    e.metric("Fewer hours of overflowing bins", f"{t['expected_overflow_min']['saved'] / 60:.1f} h",
+             f"{t['expected_overflow_min']['wastewise'] / 60:.1f} h instead of "
+             f"{t['expected_overflow_min']['routine'] / 60:.1f} h", delta_color="off")
+
+
+def accuracy_tab(d: dict) -> None:
+    v = db.data_version(conn())
+    r = _retest(v)
+    acc = d["accuracy"]
+    if not r:
+        st.info("No forecast model trained yet (Settings > AI).")
+    else:
+        st.markdown("##### How well does WasteWise predict how fast bins fill?")
+        st.markdown(
+            f"We hid the days **{_day_label(r['test_from'])} to {_day_label(r['test_to'])}** from the model while "
+            f"training, then asked it to predict them. Over the next 3 hours its prediction is off by "
+            f"**{r['model_mae']:.1f}% of the bin** on average. The best simple rule is off by "
+            f"**{r['baseline_mae']:.1f}%**, so the AI is **{r['improvement_pct']:.0f}% more accurate**. "
+            f"**{r['share_within_5_points'] * 100:.0f}%** of its predictions are within 5% of the truth.")
+        a, b, c = st.columns(3)
+        a.metric("AI forecast error", f"{r['model_mae']:.1f}% of the bin", "per 3 hours", delta_color="off")
+        b.metric("Best simple rule", f"{r['baseline_mae']:.1f}% of the bin", METHOD.get(r["baseline"], ""),
+                 delta_color="off")
+        c.metric("AI is better by", f"{r['improvement_pct']:.0f}%", delta_color="off")
+        if acc["promoted"]:
+            m = acc["promoted"]["metrics"]
+            rows = [{"method": METHOD.get(k, k), "err": x["mae_3h_points"],
+                     "used": ("used", "green") if k == m["best_model"] else None}
+                    for k, x in sorted(m["test"].items(), key=lambda kv: kv[1]["mae_3h_points"])]
+            table([dict(x, err_txt=f"{x['err']:.1f}% of the bin") for x in rows],
+                  [Col("method", "Method"), Col("err_txt", "Average error over 3 hours"), Col("used", "", "pill")])
+        fig = go.Figure()
+        fig.add_scatter(x=[x["hours_ahead"] for x in r["by_lead"]], y=[x["model"] for x in r["by_lead"]],
+                        name="AI model", mode="lines+markers", line=dict(color="#2563EB"))
+        fig.add_scatter(x=[x["hours_ahead"] for x in r["by_lead"]], y=[x["baseline"] for x in r["by_lead"]],
+                        name="best simple rule", mode="lines+markers", line=dict(color="#94A3B8", dash="dash"))
+        fig.update_layout(height=280, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="hours ahead",
+                          yaxis_title="average error (% of bin)", title="Error by how far ahead we predict",
+                          legend=dict(orientation="h"))
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+        with st.expander("Accuracy by type of place"):
+            table([{"type": SITE_LABEL.get(x["site_type"], x["site_type"]), "ai": f"{x['model']:.1f}%",
+                    "rule": f"{x['baseline']:.1f}%",
+                    "win": ("AI better", "green") if x["model"] < x["baseline"] else ("rule better", "amber")}
+                   for x in r["by_site_type"]],
+                  [Col("type", "Type of place"), Col("ai", "AI error"), Col("rule", "Simple rule error"),
+                   Col("win", "", "pill")])
+        st.caption(f"Tested on {r['rows']:,} predictions - {r['label']}.")
+        if can("settings") and st.button("Re-test the model now"):
+            _retest.clear()
+            _state_risk.clear()
+            st.rerun()
+
+    sr = _state_risk(db.data_version(conn()))
+    if sr:
+        st.markdown("##### How well does WasteWise know each bin's fill right now?")
+        st.markdown(f"- Bins **with a sensor**: off by **{sr['state_mae_sensor']:.0f}% of the bin** on average.\n"
+                    f"- Bins **without a sensor** (crew and supervisor estimates only): off by "
+                    f"**{sr['state_mae_manual']:.0f}%** - adding sensors to these bins would help most.\n"
+                    f"- **Overflow warnings:** when WasteWise says a bin is very likely full (over 90%), it is full "
+                    + next((f"**{x['observed'] * 100:.0f}%** of the time" for x in sr["calibration"]
+                            if x["bin"].startswith("0.9")), "most of the time") + ".")
+        st.caption(f"Checked against the true fill of the last 7 days - {sr['label']}.")
+
+    if acc["mildura"]:
+        mm = acc["mildura"]
+        t = mm["test"]
+        best_rule = min((k for k in t if k in ("same_hour_last_7_days", "mean_rate_last_7_days", "last_24_hours")),
+                        key=lambda k: t[k]["mae_3h_points"])
+        ai = t["gbt"]["mae_3h_points"]
+        rule = t[best_rule]["mae_3h_points"]
+        st.markdown("##### Real-world test: smart bins in Mildura, Australia")
+        st.markdown(f"The same method trained and tested on **real sensor data** from {len(mm['devices'])} bins of "
+                    f"Mildura Rural City Council: the AI is off by **{ai:.1f}%** of the bin per 3 hours, the best "
+                    f"simple rule by **{rule:.1f}%** - **{(1 - ai / rule) * 100:.0f}% more accurate** on real data.")
+        if mm.get("transfer_from_sanpada_model"):
+            tr = mm["transfer_from_sanpada_model"].get("sanpada_gbt", {}).get("mae_3h_points")
+            if tr:
+                st.caption(f"Honest note: the model trained on our synthetic Sanpada data does *not* work as well in "
+                           f"Mildura ({tr:.1f}%) - a model must be trained on each city's own data.")
+        st.caption(mm["label"])
+
+
 def page() -> None:
     st.title("Reports")
     synthetic_notice()
     c = conn()
     now = db.now() // 600 * 600
     d = _data(db.data_version(c), now)
-    t = st.tabs(["Bin sizing", "Weekly & hourly patterns", "Festival effect", "7-day outlook",
-                 "Savings vs routine", "Forecast accuracy"])
-
+    t = st.tabs(["Bin sizes", "When bins fill", "Festivals", "Next 7 days", "Savings", "Forecast accuracy"])
     with t[0]:
-        df = pd.DataFrame(d["sizing"])
-        need = df[df.recommendation.str.startswith("too small")]
-        over = df[df.recommendation.str.startswith("over-serviced")]
-        a, b = st.columns(2)
-        a.metric("Bins too small (bigger bin / extra pickup)", len(need))
-        b.metric("Over-serviced bins", len(over))
-        st.caption("Based on how full crews found each bin at collection over the last 28 days.")
-        st.dataframe(df.rename(columns={"bin_id": "Bin", "landmark": "Place", "site_type": "Type",
-                                        "capacity_l": "Capacity (L)", "every_days": "Every (days)",
-                                        "collections": "Collections", "mean_fill_at_collection": "Avg fill at pickup %",
-                                        "share_full_at_collection": "Share full at pickup",
-                                        "full_readings": "Full readings", "recommendation": "Recommendation"})
-                     .sort_values("Avg fill at pickup %", ascending=False),
-                     hide_index=True, use_container_width=True)
-
+        sizing_tab(d)
     with t[1]:
-        types = sorted(d["patterns"])
-        st_ = st.selectbox("Site type", types, index=types.index("housing") if "housing" in types else 0)
-        z = d["patterns"][st_]
-        fig = go.Figure(go.Heatmap(z=z, x=[f"{h:02d}" for h in range(24)], y=DAYS, colorscale="Blues",
-                                   colorbar=dict(title="% / hour")))
-        fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0), xaxis_title="hour of day")
-        st.plotly_chart(fig, use_container_width=True)
-        tot = pd.DataFrame({k: [sum(row) for row in v] for k, v in d["patterns"].items()}, index=DAYS)
-        st.caption("Filling per day (% of capacity) by site type")
-        st.dataframe(tot.round(0), use_container_width=True)
-
+        patterns_tab(d)
     with t[2]:
-        h = pd.DataFrame(d["hist"])
-        if h.empty:
-            st.info("No collections recorded yet.")
-        else:
-            fig = px.bar(h, x="date", y="litres", color=h["festival"].fillna("normal day"),
-                         labels={"litres": "litres collected", "color": ""})
-            fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0), legend_title_text="")
-            st.plotly_chart(fig, use_container_width=True)
-            if d["fest"]:
-                st.dataframe(pd.DataFrame(d["fest"]).rename(columns={"festival": "Festival", "days": "Days",
-                                                                     "mean_litres": "Litres per day",
-                                                                     "vs_normal": "x normal day"}),
-                             hide_index=True)
-            st.caption("Festival dates are approximate (lunar calendar) - check against the official holiday list.")
-
+        festival_tab(d)
     with t[3]:
-        o = pd.DataFrame(d["outlook"])
-        fig = go.Figure()
-        fig.add_bar(x=o["date"], y=o["expected_litres"], name="expected waste (L)",
-                    marker_color=["#DC2626" if x else "#2563EB" for x in o["over_capacity"]],
-                    text=o["festival"].fillna(""), textposition="outside")
-        fig.add_scatter(x=o["date"], y=o["fleet_capacity_litres"], name="fleet capacity per shift", mode="lines",
-                        line=dict(color="#0F172A", dash="dash"))
-        fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig, use_container_width=True)
-        bad = o[o.over_capacity]
-        if len(bad):
-            st.error("Expected waste exceeds what the fleet can carry on: " + ", ".join(bad["date"])
-                     + ". Plan an extra truck or a second round.")
-        else:
-            st.success("The fleet can carry the expected waste on each of the next 7 days.")
-        st.caption("Expected waste = each bin's learned weekly pattern, raised on festival days by the festival "
-                   "effect measured in the history. Fleet capacity = truck capacities x landfill trips per shift "
-                   "in the latest approved plan.")
-
+        outlook_tab(d)
     with t[4]:
-        s = d["savings"]
-        if not s["plans"]:
-            st.info("Savings appear once daily plans have been approved.")
-        else:
-            st.write(f"Across **{s['plans']}** approved daily plan(s), compared with the nearest-bin routine on the "
-                     "same day and data" + (" - **demonstration data**." if s["demonstration"] else "."))
-            names = {"distance_km": "Distance (km)", "fuel_l": "Fuel (L)", "co2_kg": "CO₂ (kg)",
-                     "expected_overflow_min": "Expected overflow (bin-min)", "bins_full_on_arrival": "Bins full on arrival"}
-            st.dataframe(pd.DataFrame([{"": names[k], "WasteWise": v["wastewise"], "Routine": v["routine"],
-                                        "Saved": v["saved"]} for k, v in s["totals"].items()]),
-                         hide_index=True, use_container_width=True)
-
+        savings_tab(d)
     with t[5]:
-        acc = d["accuracy"]
-        if not acc["promoted"]:
-            st.info("No forecaster trained yet (Settings > AI).")
-        else:
-            m = acc["promoted"]["metrics"]
-            st.write(f"Promoted model #{acc['promoted']['id']} ({m['best_model']}, {m.get('gbt_library')}). "
-                     f"Locked test window {m['test_window']['test_start'][:10]} to {m['test_window']['test_end'][:10]} "
-                     f"- {m['label']}.")
-            st.dataframe(pd.DataFrame([{"Model / baseline": k, "Error (fill points per 3 h)": v["mae_3h_points"],
-                                        "Bias": v["bias_3h_points"]} for k, v in m["test"].items()])
-                         .sort_values("Error (fill points per 3 h)"), hide_index=True)
-        if acc["mildura"]:
-            mm = acc["mildura"]
-            st.subheader("Real-world test: Mildura smart bins")
-            st.caption(mm["label"])
-            st.dataframe(pd.DataFrame([{"Model / baseline": k, "Error (fill points per 3 h)": v["mae_3h_points"]}
-                                       for k, v in mm["test"].items()]).sort_values("Error (fill points per 3 h)"),
-                         hide_index=True)
-            if mm.get("transfer_from_sanpada_model"):
-                st.caption("The model trained on synthetic Sanpada data does not transfer to Mildura: " + ", ".join(
-                    f"{k} {v['mae_3h_points']}" for k, v in mm["transfer_from_sanpada_model"].items()))
+        accuracy_tab(d)

@@ -537,3 +537,47 @@ def mildura_evaluation(path: Path, sanpada_model: Forecaster | None = None) -> d
         p = sanpada_model.predict_parts(X[te])
         out["transfer_from_sanpada_model"] = scores(y[te], {f"sanpada_{k}": v for k, v in p.items()})
     return out
+
+
+# ------------------------------------------------------------------ accuracy check of the model in use
+def evaluate_promoted(conn: sqlite3.Connection, history_days: int = 180) -> dict | None:
+    """Re-test the model in use on the locked test window (no training): overall, by how far
+    ahead, and by site type, against the simple baselines. Errors are in fill points (% of the bin)
+    over a 3-hour window."""
+    cur = promoted(conn)
+    lock = db.get_meta(conn, "forecast_test_window")
+    if not cur or not lock:
+        return None
+    model = _load(cur["path"])
+    end_ts = int(conn.execute("SELECT MAX(ts) FROM readings").fetchone()[0])
+    X, y, ots, keys = dataset(sanpada_series(conn, end_ts - history_days * 86400, end_ts))
+    _, _, te, bounds = chrono_split(ots, bounds=json.loads(lock))
+    if not te.any():
+        return None
+    Xt, yt, kt = X[te], y[te], keys[te]
+    best = cur["metrics"]["best_model"]
+    pred = model.predict_parts(Xt)[best]
+    base = baselines(Xt)
+    base_name = min(base, key=lambda n: np.abs(base[n] - yt).mean())
+    err = np.abs(pred - yt) * WINDOW
+    berr = np.abs(base[base_name] - yt) * WINDOW
+    lead_col = FEATURES.index("lead_h")
+    by_lead = []
+    for k in sorted(set(Xt[:, lead_col].astype(int))):
+        m = Xt[:, lead_col] == k
+        by_lead.append({"hours_ahead": int(k), "model": round(float(err[m].mean()), 2),
+                        "baseline": round(float(berr[m].mean()), 2), "n": int(m.sum())})
+    site = {b["id"]: b["site_type"] for b in db.bins(conn, active_only=False)}
+    by_site: dict[str, list] = {}
+    for i, key in enumerate(kt):
+        by_site.setdefault(site.get(str(key), "?"), []).append(i)
+    by_type = [{"site_type": t, "model": round(float(err[ix].mean()), 2), "baseline": round(float(berr[ix].mean()), 2),
+                "n": len(ix)} for t, ix in sorted(by_site.items())]
+    within5 = float((err <= 5).mean())
+    return {"label": "SYNTHETIC demonstration data", "model_id": cur["id"], "model": best,
+            "test_from": datetime.fromtimestamp(bounds["test_start"], config.IST).date().isoformat(),
+            "test_to": datetime.fromtimestamp(bounds["test_end"], config.IST).date().isoformat(),
+            "rows": int(te.sum()), "model_mae": round(float(err.mean()), 2),
+            "baseline": base_name, "baseline_mae": round(float(berr.mean()), 2),
+            "improvement_pct": round((1 - err.mean() / berr.mean()) * 100, 1),
+            "share_within_5_points": round(within5, 3), "by_lead": by_lead, "by_site_type": by_type}

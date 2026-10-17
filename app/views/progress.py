@@ -1,15 +1,17 @@
 """Progress: planned vs actual per truck, exceptions with what to do, paper sheets, CSV."""
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
 from wastewise import db, progress
 
 from ui.common import can, conn, hhmm, log, mark_seen, user
+from ui.tables import Col, table
 
-STATUS_LABEL = {"collected": "Collected", "late": "Late (> 30 min)", "could_not_reach": "Could not reach",
+STATUS_LABEL = {"collected": "Collected", "late": "Collected late", "could_not_reach": "Could not reach",
                 "bin_missing": "Bin missing", "overdue": "Overdue", "missed": "Missed", "pending": "To do"}
+STATUS_COLOUR = {"collected": "green", "late": "amber", "could_not_reach": "red", "bin_missing": "red",
+                 "overdue": "orange", "missed": "red", "pending": "grey"}
 
 
 def tab(day) -> None:
@@ -25,21 +27,30 @@ def tab(day) -> None:
         with col.container(border=True):
             st.markdown(f"**{veh}**")
             st.progress(s["collected"] / max(s["planned"], 1), text=f"{s['collected']} of {s['planned']} collected")
-            st.caption(f"late {s['late']} · problems {s['problems']} · overdue {s['overdue']} · missed {s['missed']}")
+            bits = [f"{s['late']} late" if s["late"] else "", f"{s['problems']} problem(s)" if s["problems"] else "",
+                    f"{s['overdue']} overdue" if s["overdue"] else "", f"{s['missed']} missed" if s["missed"] else ""]
+            st.caption(", ".join(b for b in bits if b) or "No problems so far")
     ex = [r for r in rows if r["status"] in ("late", "could_not_reach", "bin_missing", "overdue", "missed")]
     if ex:
         st.subheader(f"Exceptions ({len(ex)})")
         for r in ex:
             fn = st.error if r["status"] in ("could_not_reach", "bin_missing", "missed") else st.warning
-            fn(f"**{r['bin_id']} {r['landmark']}** ({r['vehicle_name']}, planned {hhmm(r['planned_ts'])}): "
-               f"{STATUS_LABEL[r['status']]}" + (f", {r['delay_min']} min" if r["delay_min"] else "")
+            fn(f"**{r['landmark']}** ({r['vehicle_name']}, planned {hhmm(r['planned_ts'])}): "
+               f"{STATUS_LABEL[r['status']]}" + (f", {r['delay_min']} min after the planned time" if r["delay_min"] else "")
                + f"  \nWhat to do: {r['action']}")
-    df = pd.DataFrame([{"Truck": r["vehicle_name"], "Bin": r["bin_id"], "Place": r["landmark"],
-                        "Planned": hhmm(r["planned_ts"]), "Actual": hhmm(r["actual_ts"]) if r["actual_ts"] else "",
-                        "Status": STATUS_LABEL[r["status"]], "Delay (min)": r["delay_min"],
-                        "How full (crew)": f"{r['fill_reported']:.0f}%" if r["fill_reported"] is not None else "",
-                        "By": r["by"] or ""} for r in rows])
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    def late_text(r):
+        if r["delay_min"] is None:
+            return ""
+        return "on time" if abs(r["delay_min"]) <= 5 else (f"{r['delay_min']} min late" if r["delay_min"] > 0
+                                                           else f"{-r['delay_min']} min early")
+    table([{"truck": r["vehicle_name"], "place": r["landmark"], "planned": hhmm(r["planned_ts"]),
+            "actual": hhmm(r["actual_ts"]) if r["actual_ts"] else "", "late": late_text(r),
+            "status": (STATUS_LABEL[r["status"]], STATUS_COLOUR[r["status"]]),
+            "fill": f"{r['fill_reported']:.0f}%" if r["fill_reported"] is not None else "", "by": r["by"] or ""}
+           for r in rows],
+          [Col("truck", "Truck"), Col("place", "Place"), Col("planned", "Planned"), Col("actual", "Done at"),
+           Col("late", ""), Col("status", "Status", "pill"), Col("fill", "How full (crew said)"),
+           Col("by", "Recorded by")], max_height=520)
     csv = progress.to_csv(rows, hhmm)
     if st.download_button("End-of-shift report (CSV)", csv, file_name=f"wastewise_progress_{d}.csv", mime="text/csv",
                           icon=":material/download:"):
@@ -51,7 +62,7 @@ def tab(day) -> None:
             plans = {p["id"]: p for p in progress.day_plans(c, d)}
             with st.form("paper", clear_on_submit=True):
                 bid = st.selectbox("Bin", [r["bin_id"] for r in todo], index=None, placeholder="Bin on the sheet",
-                                   format_func=lambda x: next(f"{r['bin_id']} {r['landmark']} ({r['vehicle_name']})"
+                                   format_func=lambda x: next(f"{r['landmark']} ({r['vehicle_name']}, planned {hhmm(r['planned_ts'])})"
                                                               for r in todo if r["bin_id"] == x))
                 outcome = st.radio("What happened", ["collected", "could_not_reach", "bin_missing"],
                                    format_func=STATUS_LABEL.get, horizontal=True)

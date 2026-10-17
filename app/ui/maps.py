@@ -87,9 +87,9 @@ def plan_map(plan: dict, places: dict, bins: list[dict], net: roads.Network | No
         lat = [s["lat"] for s in stops]
         lon = [s["lon"] for s in stops]
         nums = [str(i) for i in range(1, len(stops) + 1)]
-        hover = [f"<b>{r['vehicle_name']} stop {n}</b><br>{s['bin_id']} {s['landmark']}<br>{s['street']}<br>"
-                 f"Arrives {hhmm(s['arrive_ts'])} · expected {s['expected_fill_pct']:.0f}% full "
-                 f"(chance full {100 * s['p_full']:.0f}%)<br>Status: {STATUS_WORDS[s['status']]}"
+        hover = [f"<b>{s['landmark']}</b><br>{s['street']}<br>{r['vehicle_name']}, stop {n}, arrives "
+                 f"{hhmm(s['arrive_ts'])}<br>Expected {min(s['expected_fill_pct'], 120):.0f}% full · "
+                 f"{STATUS_WORDS[s['status']]}"
                  for n, s in zip(nums, stops)]
         fig.add_trace(go.Scattermap(lat=lat, lon=lon, mode="markers", marker=dict(size=24, color=r["color"]),
                                     hoverinfo="skip", showlegend=False))
@@ -104,7 +104,7 @@ def plan_map(plan: dict, places: dict, bins: list[dict], net: roads.Network | No
             lat=[b["lat"] for b in other], lon=[b["lon"] for b in other], mode="markers",
             marker=dict(size=11, color=["#111827" if b["id"] in left and left[b["id"]]["due"] else NOT_PLANNED
                                         for b in other]),
-            hovertext=[f"{b['id']} {b['landmark']}<br>" + ("DUE but left out: " + left[b["id"]]["reason"]
+            hovertext=[f"<b>{b['landmark']}</b><br>" + ("Due but left out: " + left[b["id"]]["reason"]
                                                          if b["id"] in left and left[b["id"]]["due"]
                                                          else "not in today's plan") for b in other],
             hoverinfo="text", name="Not in plan"))
@@ -132,10 +132,9 @@ def bins_map(bins: list[dict], status: dict[str, str], fills: dict[str, float], 
         if not sel:
             continue
         fig.add_trace(go.Scattermap(
-            lat=[b["lat"] for b in sel], lon=[b["lon"] for b in sel], mode="markers+text",
-            marker=dict(size=13, color=STATUS_COLOURS[st_name]), text=[b["id"][-3:] for b in sel],
-            textposition="top right", textfont=dict(size=11, color="#0F172A"),
-            hovertext=[f"<b>{b['id']}</b> {b['landmark']}<br>{b['street']}<br>about {fills.get(b['id'], 0):.0f}% full"
+            lat=[b["lat"] for b in sel], lon=[b["lon"] for b in sel], mode="markers",
+            marker=dict(size=13, color=STATUS_COLOURS[st_name]),
+            hovertext=[f"<b>{b['landmark']}</b><br>{b['street']}<br>about {min(fills.get(b['id'], 0), 120):.0f}% full"
                        for b in sel], hoverinfo="text", name=STATUS_WORDS[st_name].capitalize()))
     if highlight:
         b = next((x for x in bins if x["id"] == highlight), None)

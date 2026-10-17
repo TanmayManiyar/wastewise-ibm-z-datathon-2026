@@ -127,3 +127,31 @@ def css() -> None:
     header, footer, [data-testid="stSidebar"], [data-testid="stToolbar"], .stButton, .no-print {display:none !important;}
   }
 </style>""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------- plain-language numbers
+def duration(minutes: float) -> str:
+    """150 -> '2 h 30 min', 40 -> '40 min'."""
+    m = int(round(max(0.0, float(minutes))))
+    if m < 60:
+        return f"{m} min"
+    h, r = divmod(m, 60)
+    return f"{h} h" + (f" {r} min" if r else "")
+
+
+def litres(v: float) -> str:
+    return f"{int(round(v)):,} L"
+
+
+def change(new: float, old: float, unit: str, fewer: str = "less", more: str = "more", digits: int = 0) -> str:
+    """'32 km less than the old routine' style text."""
+    d = round(new - old, digits)
+    if abs(d) < (10 ** -digits) / 2:
+        return "same as the old routine"
+    n = f"{abs(d):,.{digits}f}"
+    return f"{n} {unit} {fewer if d < 0 else more} than the old routine"
+
+
+def vehicle_names() -> dict[str, str]:
+    from wastewise import db as _db
+    return {v["id"]: v["name"] for v in _db.vehicles(conn(), active_only=False)}
