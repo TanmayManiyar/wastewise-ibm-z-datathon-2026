@@ -7,7 +7,7 @@ import streamlit as st
 
 from wastewise import db, planner, progress
 
-from ui.common import conn, hhmm, live_refresh, mark_seen, user
+from ui.common import can, conn, hhmm, live_refresh, mark_seen, user
 from ui.i18n import LANGS, t
 
 FILL_CHOICES = [("q", 25.0), ("h", 50.0), ("t", 75.0), ("f", 100.0), ("o", 120.0)]
@@ -145,4 +145,5 @@ def preview(day) -> None:
                "(for example when the crew phones in).")
     left, _ = st.columns([1, 1.4])
     with left.container(border=True):
-        render(vid, day.isoformat(), interactive=True, key=f"pv_{vid}")
+        # only roles that may record progress get working buttons (viewers just look)
+        render(vid, day.isoformat(), interactive=can("record_progress"), key=f"pv_{vid}")
