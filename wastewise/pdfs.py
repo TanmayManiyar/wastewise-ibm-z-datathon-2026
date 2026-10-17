@@ -250,3 +250,61 @@ def shift_report(day: str, rows: list[dict], summary: dict[str, dict], labels: d
             pdf.cell(w, 7, _fit(pdf, v, w), border=1)
         pdf.ln()
     return bytes(pdf.output())
+
+
+def monthly_report(m: dict) -> bytes:
+    """Monthly summary for NMMC headquarters: totals, complaints, crews' performance, fuel and maintenance."""
+    pdf = _Doc(f"WasteWise monthly summary - {m['label']} - printed {fmt.when(datetime.now(config.IST).timestamp())}")
+    pdf.alias_nb_pages()
+    pdf.add_page()
+    t = m["totals"]
+    _header(pdf, "Solid waste management - Sanpada ward (NMMC)", f"Monthly summary - {m['label']}",
+            [("Collections", f"{t['collections']:,}"), ("Waste collected", fmt.litres(t["litres"])),
+             ("Could not reach", str(t["not_reached"])), ("Bins missing", str(t["missing"])),
+             ("Complaints", f"{t['complaints']} ({t['complaints_closed']} closed)")], m["synthetic"])
+
+    def heading(text):
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, _latin(text), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9.5)
+
+    heading("Complaints")
+    pdf.cell(0, 6, _latin(f"{t['complaints']} received, {t['complaints_closed']} closed by staff"
+                          + (f"; median time to close {m['median_close_h']} h" if m["median_close_h"] is not None else "")
+                          + "."), new_x="LMARGIN", new_y="NEXT")
+    heading("Crews (all visits this month)")
+    cols = [("TRUCK", 40), ("VISITS", 22), ("ON TIME", 24), ("MISSED", 24), ("PROBLEMS", 24), ("GPS VERIFIED", 30)]
+    _table_head(pdf, cols)
+    pdf.set_font("Helvetica", "", 9)
+    for r in m["performance"]:
+        vals = [r["truck"], str(r["visits"]), "-" if r["on_time_pct"] is None else f"{r['on_time_pct']}%",
+                "-" if r["missed_pct"] is None else f"{r['missed_pct']}%", str(r["problems"]),
+                "-" if r["verified_pct"] is None else f"{r['verified_pct']}%"]
+        for (_, w), v in zip(cols, vals):
+            pdf.cell(w, 7, _fit(pdf, v, w), border=1)
+        pdf.ln()
+    heading("Fuel and maintenance (truck log)")
+    if not m["fuel"]:
+        pdf.cell(0, 6, "No entries in the truck log this month.", new_x="LMARGIN", new_y="NEXT")
+    for vid, f in m["fuel"].items():
+        pdf.cell(0, 6, _latin(f"{vid}: {fmt.litres(f['fuel_l'])} diesel, Rs {f['cost_rs']:,.0f}, "
+                              f"{f['maintenance']} maintenance, {f['breakdowns']} breakdown(s)"),
+                 new_x="LMARGIN", new_y="NEXT")
+    heading("Day by day")
+    cols = [("DATE", 30), ("COLLECTIONS", 28), ("LITRES", 30), ("NOT REACHED", 28), ("MISSING", 22),
+            ("COMPLAINTS", 26), ("CLOSED", 22), ("KM (PLANS)", 26)]
+    _table_head(pdf, cols)
+    pdf.set_font("Helvetica", "", 9)
+    for r in m["days"]:
+        if pdf.get_y() > pdf.h - 22:
+            pdf.add_page()
+            _table_head(pdf, cols)
+            pdf.set_font("Helvetica", "", 9)
+        vals = [_date(r["date"]), str(r["collections"]), fmt.litres(r["litres"]), str(r["not_reached"]),
+                str(r["missing"]), str(r["complaints"]), str(r["complaints_closed"]),
+                fmt.km(r["km_planned"]) if r["km_planned"] else "-"]
+        for (_, w), v in zip(cols, vals):
+            pdf.cell(w, 7, _fit(pdf, v, w), border=1)
+        pdf.ln()
+    return bytes(pdf.output())

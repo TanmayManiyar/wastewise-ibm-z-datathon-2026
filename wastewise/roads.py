@@ -61,7 +61,8 @@ class Graph:
         return sum(len(a) for a in self.adj)
 
 
-def build_graph(roads: dict, speeds_kmh: dict[str, float]) -> Graph:
+def build_graph(roads: dict, speeds_kmh: dict[str, float], closed: frozenset[str] = frozenset()) -> Graph:
+    """closed: street names that are closed (Settings > Roads); their segments are left out."""
     nodes = {e["id"]: (e["lat"], e["lon"]) for e in roads["elements"] if e["type"] == "node"}
     index: dict[int, int] = {}
     lat, lon, ids = [], [], []
@@ -82,6 +83,8 @@ def build_graph(roads: dict, speeds_kmh: dict[str, float]) -> Graph:
         t = w.get("tags", {})
         hw = t.get("highway")
         if not hw:
+            continue
+        if closed and t.get("name") in closed:
             continue
         kmh = float(speeds_kmh.get(_speed_class(hw), speeds_kmh.get("road", 14)))
         ms = _maxspeed(t.get("maxspeed"))
@@ -236,9 +239,10 @@ def snap(g: Graph, mask: np.ndarray, lat: float, lon: float) -> tuple[int, float
     return int(cand[k]), float(d[k])
 
 
-def build_network(stops: list[tuple[str, float, float]], speeds_kmh: dict, roads: dict | None = None) -> Network:
+def build_network(stops: list[tuple[str, float, float]], speeds_kmh: dict, roads: dict | None = None,
+                  closed: frozenset[str] = frozenset()) -> Network:
     roads = roads or osm.load(osm.ROADS_FILE)
-    g = build_graph(roads, speeds_kmh)
+    g = build_graph(roads, speeds_kmh, closed)
     mask = largest_scc(g) & g.stoppable
     nodes, snaps = [], []
     for _, la, lo in stops:
@@ -276,23 +280,28 @@ def _cache_key(stops, speeds, roads_meta) -> str:
 _MEMO: dict[str, Network] = {}
 
 
-def network_for(conn, cache_dir: Path | None = None) -> Network:
-    """Network for the current bins/depot/landfill/speeds; cached in memory and on disk."""
-    from . import db
+def network_for(conn, cache_dir: Path | None = None, at_ts: int | None = None,
+                closed: frozenset[str] | None = None) -> Network:
+    """Network for the current bins/depot/landfill/speeds and the road closures in force at at_ts (default
+    now; pass closed=frozenset() for the full network); cached in memory and on disk."""
+    from . import closures, db
     stops = [(s, round(a, 6), round(b, 6)) for s, a, b in stops_from_db(conn)]
     speeds = db.get_settings(conn)["speeds_kmh"]
     roads = osm.load(osm.ROADS_FILE)
-    key = _cache_key(stops, speeds, roads.get("osm3s", {}).get("timestamp_osm_base"))
+    if closed is None:
+        closed = closures.closed_names(conn, at_ts)
+    meta = roads.get("osm3s", {}).get("timestamp_osm_base")
+    key = _cache_key(stops, speeds, [meta, sorted(closed)] if closed else meta)
     if key in _MEMO:
         return _MEMO[key]
     cache_dir = Path(cache_dir or config.DATA_DIR)
     path = cache_dir / f"network_{key}.npz"
-    g = build_graph(roads, speeds)
+    g = build_graph(roads, speeds, closed)
     if path.exists():
         z = np.load(path)
         net = Network(g, [str(s) for s in z["stop_ids"]], z["stop_node"], z["snap_m"], z["time_s"], z["dist_m"], z["preds"])
     else:
-        net = build_network(stops, speeds, roads)
+        net = build_network(stops, speeds, roads, closed)
         np.savez_compressed(path, stop_ids=np.array(net.stop_ids), stop_node=net.stop_node, snap_m=net.snap_m,
                             time_s=net.time_s, dist_m=net.dist_m, preds=net.preds)
     _MEMO[key] = net

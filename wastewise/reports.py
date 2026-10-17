@@ -146,3 +146,116 @@ def forecast_accuracy(conn: sqlite3.Connection) -> dict:
             out["mildura"] = d["mildura"]
             break
     return out
+
+
+# ------------------------------------------------------------------ crew performance and monthly summary
+def crew_performance(conn: sqlite3.Connection, now_ts: int, days: int = 28) -> list[dict]:
+    """Per truck over the last `days` days: on-time %, missed %, problems, proof of service.
+    A visit is on time when collected within the 'late after' minutes of its planned time (routine or plan).
+    Missed = could not reach, or planned in an approved plan and never recorded."""
+    from . import progress
+    late_s = 60 * int(db.get_settings(conn)["late_threshold_min"])
+    since = now_ts - days * 86400
+    names = {v["id"]: v["name"] for v in db.vehicles(conn, active_only=False)}
+    out: dict[str, dict] = {vid: {"vehicle_id": vid, "truck": names[vid], "visits": 0, "collected": 0, "on_time": 0,
+                                  "not_reached": 0, "missing": 0, "never_recorded": 0, "with_gps": 0, "verified": 0,
+                                  "synthetic": 0, "timed": 0} for vid in names}
+    for e in db.rows(conn, "SELECT * FROM events WHERE ts BETWEEN ? AND ? AND vehicle_id IS NOT NULL AND kind IN"
+                           " ('collected','could_not_reach','bin_missing')", (since, now_ts)):
+        t = out.get(e["vehicle_id"])
+        if t is None:
+            continue
+        t["visits"] += 1
+        t["synthetic"] += e["synthetic"]
+        if e["kind"] == "collected":
+            t["collected"] += 1
+            if e["planned_ts"] is not None:
+                t["timed"] += 1
+                t["on_time"] += e["ts"] - e["planned_ts"] <= late_s
+        elif e["kind"] == "could_not_reach":
+            t["not_reached"] += 1
+        else:
+            t["missing"] += 1
+        if e["dist_m"] is not None:
+            t["with_gps"] += 1
+            t["verified"] += e["dist_m"] <= 100
+    # stops in approved plans that were never recorded
+    days_with_plans = [r[0] for r in conn.execute("SELECT DISTINCT plan_date FROM plans WHERE approved_at IS NOT NULL"
+                                                  " AND plan_date BETWEEN ? AND ?",
+                                                  (_day(since).isoformat(), _day(now_ts).isoformat()))]
+    for d in days_with_plans:
+        for r in progress.status_rows(conn, d, now_ts):
+            if r["status"] == "missed" and r["vehicle_id"] in out:
+                out[r["vehicle_id"]]["never_recorded"] += 1
+                out[r["vehicle_id"]]["visits"] += 1
+    rows = []
+    for t in out.values():
+        v = max(t["visits"], 1)
+        rows.append(dict(t, on_time_pct=round(100 * t["on_time"] / t["timed"]) if t["timed"] else None,
+                         missed_pct=round(100 * (t["not_reached"] + t["never_recorded"]) / v, 1) if t["visits"] else None,
+                         problems=t["not_reached"] + t["missing"],
+                         verified_pct=round(100 * t["verified"] / t["with_gps"]) if t["with_gps"] else None))
+    return rows
+
+
+def monthly_summary(conn: sqlite3.Connection, year: int, month: int) -> dict:
+    """The monthly figures the ward reports to NMMC headquarters."""
+    from . import fleet
+    start = datetime(year, month, 1, tzinfo=config.IST)
+    end = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=config.IST)
+    s, e = int(start.timestamp()), int(end.timestamp()) - 1
+    bins = {b["id"]: b for b in db.bins(conn, active_only=False)}
+    days: dict[str, dict] = {}
+    for ev in db.rows(conn, "SELECT ts, bin_id, kind, fill_before, synthetic FROM events WHERE ts BETWEEN ? AND ?"
+                            " AND kind IN ('collected','could_not_reach','bin_missing')", (s, e)):
+        d = _day(ev["ts"]).isoformat()
+        r = days.setdefault(d, {"date": d, "collections": 0, "litres": 0.0, "not_reached": 0, "missing": 0,
+                                "complaints": 0, "complaints_closed": 0, "km_planned": 0.0, "synthetic_rows": 0})
+        r["synthetic_rows"] += ev["synthetic"]
+        if ev["kind"] == "collected":
+            r["collections"] += 1
+            b = bins.get(ev["bin_id"])
+            if b:
+                r["litres"] += b["capacity_l"] * min(ev["fill_before"] if ev["fill_before"] is not None else 75, 120) / 100
+        elif ev["kind"] == "could_not_reach":
+            r["not_reached"] += 1
+        else:
+            r["missing"] += 1
+    close_h = []
+    for c in db.rows(conn, "SELECT ts, status, resolved_at FROM complaints WHERE ts BETWEEN ? AND ?", (s, e)):
+        d = _day(c["ts"]).isoformat()
+        r = days.setdefault(d, {"date": d, "collections": 0, "litres": 0.0, "not_reached": 0, "missing": 0,
+                                "complaints": 0, "complaints_closed": 0, "km_planned": 0.0, "synthetic_rows": 0})
+        r["complaints"] += 1
+        if c["status"] == "resolved" and c["resolved_at"]:
+            r["complaints_closed"] += 1
+            close_h.append((c["resolved_at"] - c["ts"]) / 3600)
+    for p in db.rows(conn, "SELECT plan_date, body FROM plans WHERE approved_at IS NOT NULL AND kind IN"
+                           " ('daily','replan','extra') AND status='approved' AND plan_date BETWEEN ? AND ?",
+                     (start.date().isoformat(), (end.date() - timedelta(days=1)).isoformat())):
+        body = json.loads(p["body"])
+        r = days.setdefault(p["plan_date"], {"date": p["plan_date"], "collections": 0, "litres": 0.0, "not_reached": 0,
+                                             "missing": 0, "complaints": 0, "complaints_closed": 0, "km_planned": 0.0,
+                                             "synthetic_rows": 0})
+        r["km_planned"] += body["kpis"]["distance_km"]
+    rows = [days[d] for d in sorted(days)]
+    fuel = fleet.month_totals(conn, s, e)
+    tot = {k: sum(r[k] for r in rows) for k in ("collections", "litres", "not_reached", "missing", "complaints",
+                                                "complaints_closed", "km_planned")}
+    return {"year": year, "month": month, "label": start.strftime("%B %Y"), "days": rows, "totals": tot,
+            "median_close_h": round(float(np.median(close_h)), 1) if close_h else None,
+            "fuel": fuel, "performance": crew_performance(conn, min(e, db.now()), days=(min(e, db.now()) - s) // 86400 + 1),
+            "synthetic": any(r["synthetic_rows"] for r in rows), "start_ts": s, "end_ts": e}
+
+
+def monthly_csv(m: dict) -> str:
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["date", "collections", "litres_collected", "could_not_reach", "bin_missing", "complaints",
+                "complaints_closed", "km_in_approved_plans", "contains_synthetic_rows"])
+    for r in m["days"]:
+        w.writerow([r["date"], r["collections"], round(r["litres"]), r["not_reached"], r["missing"], r["complaints"],
+                    r["complaints_closed"], round(r["km_planned"], 1), int(r["synthetic_rows"] > 0)])
+    return buf.getvalue()

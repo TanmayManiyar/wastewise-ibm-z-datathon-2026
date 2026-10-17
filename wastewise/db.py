@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS events (
     gps_acc_m REAL,
     dist_m REAL,                   -- distance from the bin (proof of service)
     photo TEXT,                    -- photo file under data/photos
+    planned_ts INTEGER,            -- when this visit was planned (for on-time figures)
     note TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_events_bin_ts ON events(bin_id, ts);
@@ -170,6 +171,29 @@ CREATE TABLE IF NOT EXISTS truck_crew (
     ts INTEGER NOT NULL,
     PRIMARY KEY (day, vehicle_id)
 );
+CREATE TABLE IF NOT EXISTS road_closures (
+    id INTEGER PRIMARY KEY,
+    street TEXT NOT NULL,          -- OSM street name; all its road segments are closed
+    reason TEXT,
+    from_ts INTEGER NOT NULL,
+    until_ts INTEGER NOT NULL,
+    created_by TEXT,
+    created_at INTEGER NOT NULL,
+    lifted_by TEXT
+);
+CREATE TABLE IF NOT EXISTS vehicle_log (
+    id INTEGER PRIMARY KEY,
+    vehicle_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    kind TEXT NOT NULL,            -- fuel | maintenance | breakdown | repair_done
+    litres REAL,
+    cost_rs REAL,
+    odometer_km REAL,
+    note TEXT,
+    out_from INTEGER,              -- out of service from ... until ... (planning leaves the truck out)
+    out_until INTEGER,
+    user TEXT
+);
 CREATE TABLE IF NOT EXISTS route_ack (
     day TEXT NOT NULL,
     vehicle_id TEXT NOT NULL,
@@ -231,7 +255,7 @@ def init(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE bins ADD COLUMN rest_days TEXT NOT NULL DEFAULT ''")
     cols = _columns(conn, "events")
     for col, typ in (("person", "TEXT"), ("lat", "REAL"), ("lon", "REAL"), ("gps_acc_m", "REAL"),
-                     ("dist_m", "REAL"), ("photo", "TEXT")):
+                     ("dist_m", "REAL"), ("photo", "TEXT"), ("planned_ts", "INTEGER")):
         if col not in cols:
             conn.execute(f"ALTER TABLE events ADD COLUMN {col} {typ}")
     migrate_demo_register(conn)
@@ -310,6 +334,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "map_tiles": "osm",                # osm (browser loads OpenStreetMap tiles) | offline
     "llm_enabled": True,
     "llm_url": "http://127.0.0.1:8080",  # local llama.cpp server running IBM Granite
+    "landfill_open": "06:00",          # Turbhe landfill gate hours (demonstration values - confirm with NMMC)
+    "landfill_close": "22:00",
+    "landfill_queue_min": 10.0,        # typical wait at the weighbridge before unloading
     "demo_feed": "auto",               # auto = on in demonstration mode | True | False
 }
 
@@ -367,12 +394,13 @@ def add_event(conn: sqlite3.Connection, kind: str, bin_id: str | None = None,
               vehicle_id: str | None = None, plan_id: int | None = None,
               fill_before: float | None = None, ts: int | None = None,
               user: str | None = None, note: str | None = None, person: str | None = None,
-              gps: dict | None = None, dist_m: float | None = None, photo: str | None = None) -> int:
+              gps: dict | None = None, dist_m: float | None = None, photo: str | None = None,
+              planned_ts: int | None = None) -> int:
     gps = gps or {}
     cur = conn.execute(
         "INSERT INTO events(ts, bin_id, vehicle_id, plan_id, kind, fill_before, synthetic, user, note, person,"
-        " lat, lon, gps_acc_m, dist_m, photo) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " lat, lon, gps_acc_m, dist_m, photo, planned_ts) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ts or now(), bin_id, vehicle_id, plan_id, kind, fill_before, user, note, person,
-         gps.get("lat"), gps.get("lon"), gps.get("acc"), dist_m, photo))
+         gps.get("lat"), gps.get("lon"), gps.get("acc"), dist_m, photo, planned_ts))
     bump_version(conn)
     return int(cur.lastrowid)

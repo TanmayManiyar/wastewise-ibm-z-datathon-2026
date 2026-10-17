@@ -234,9 +234,11 @@ def record_crew(conn: sqlite3.Connection, plan: dict, vehicle_id: str, kind: str
     from . import proof
     ts = ts or db.now()
     dist = proof.distance_to_bin(conn, bin_id, (gps or {}).get("lat"), (gps or {}).get("lon")) if gps else None
+    planned = next((s["arrive_ts"] for r in plan["routes"] if r["vehicle_id"] == vehicle_id for s in r["stops"]
+                    if bin_id and s.get("bin_id") == bin_id), None)
     with db.tx(conn):
         db.add_event(conn, kind, bin_id, vehicle_id, plan["id"], fill_before=fill, ts=ts, user=user, note=note,
-                     person=person, gps=gps, dist_m=dist, photo=photo)
+                     person=person, gps=gps, dist_m=dist, photo=photo, planned_ts=planned)
         if kind == "collected" and bin_id:
             db.add_reading(conn, bin_id, 2.0, "crew", ts=ts + 1, user=user, note="emptied")
         if kind == "could_not_reach" and bin_id and fill is not None:

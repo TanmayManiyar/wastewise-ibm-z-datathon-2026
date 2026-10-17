@@ -34,6 +34,18 @@ def shift_window(settings: dict, day: date) -> tuple[int, int]:
     return int(start.timestamp()), int((start + timedelta(hours=float(settings["shift_hours"]))).timestamp())
 
 
+def landfill_hours(settings: dict, day: date) -> tuple[int | None, int | None]:
+    """Landfill gate opening and closing time on that day (None = no limit; 00:00-24:00 = always open)."""
+    o, c = settings.get("landfill_open", "00:00"), settings.get("landfill_close", "24:00")
+    if o == "00:00" and c in ("24:00", "00:00"):
+        return None, None
+    def at(hm: str) -> int:
+        hh, mm = map(int, hm.split(":"))
+        base = datetime(day.year, day.month, day.day, tzinfo=config.IST)
+        return int((base + timedelta(hours=hh, minutes=mm)).timestamp())
+    return at(o), at(c)
+
+
 def plan_day(conn: sqlite3.Connection, now_ts: int | None = None) -> date:
     s = db.get_settings(conn)
     return plan_day_for(datetime.fromtimestamp(now_ts or db.now(), config.IST), s["shift_start"], s["shift_hours"])
@@ -101,6 +113,8 @@ class Context:
     scenario: dict
     excluded: dict[str, str]
     start_notes: dict[str, str]
+    off_road: dict[str, dict]
+    closed_roads: list[dict]
 
 
 def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str = "daily",
@@ -113,15 +127,13 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
     settings = db.get_settings(conn)
     bins_all = db.bins(conn)
     bins = {b["id"]: b for b in bins_all}
+    from . import closures, fleet
     vehicles = [v for v in db.vehicles(conn) if v["id"] not in set(scenario.get("breakdown", []))]
     if scenario.get("extra_truck"):
         x = scenario["extra_truck"]
         vehicles.append({"id": x.get("id", "TRK-X"), "name": x.get("name", "Spare truck"),
                          "capacity_l": int(x.get("capacity_l", 6000)), "color": x.get("color", "#1E3A8A"),
                          "shift_start": settings["shift_start"], "shift_hours": settings["shift_hours"], "active": 1})
-    if not vehicles:
-        raise PlanError("No truck is available")
-    net = roads.network_for(conn)
     places = db.places(conn)
 
     if kind == "extra":
@@ -144,8 +156,18 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
             raise PlanError("The shift is already under way - use 'Re-plan from now' instead")
         start_ts = shift_start
 
-    # Bins already handled today are left out of a re-plan.
-    excluded: dict[str, str] = {}
+    # Trucks in the workshop are left out; closed roads are taken out of the network.
+    out = fleet.out_of_service(conn, start_ts, shift_end)
+    off_road = {v["id"]: out[v["id"]] for v in vehicles if v["id"] in out}
+    vehicles = [v for v in vehicles if v["id"] not in out]
+    if not vehicles:
+        raise PlanError("No truck is available (all are out of service - see Settings > Vehicles & depot)")
+    net = roads.network_for(conn, at_ts=start_ts)
+    blocked = closures.unreachable_bins(conn, start_ts)
+
+    # Bins already handled today are left out of a re-plan; bins behind a closed road cannot be reached.
+    excluded: dict[str, str] = {b: f"road closed ({c['street']}) until {closures.until_text(c['until_ts'])}"
+                                for b, c in blocked.items() if b in bins}
     if kind == "replan":
         for r in conn.execute("SELECT bin_id, kind FROM events WHERE ts BETWEEN ? AND ? AND bin_id IS NOT NULL"
                               " ORDER BY ts", (shift_start, now_ts)):
@@ -221,6 +243,7 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
         vlist.append(optimiser.Vehicle(v["id"], float(v["capacity_l"]), pos, float(start_ts), float(shift_end),
                                        float(load), v["color"]))
     s = settings
+    lf_open, lf_close = landfill_hours(settings, day)
     service = [60.0 * (s["service_min_base"] + s["service_min_per_1000l"] * bins[b]["capacity_l"] / 1000)
                for b in cand_ids]
     prob = optimiser.Problem(
@@ -229,10 +252,12 @@ def build_context(conn: sqlite3.Connection, now_ts: int | None = None, kind: str
         due=[due[b]["due"] for b in cand_ids],
         weight=[optimiser.PRIORITY_WEIGHT[int(bins[b]["priority"])] for b in cand_ids],
         service_s=service, bin_capacity_l=[float(bins[b]["capacity_l"]) for b in cand_ids],
-        owner=owner, risk=curves, vehicles=vlist, unload_s=60.0 * float(places["landfill"]["unload_min"]),
-        params=optimiser.CostParams(beat_penalty=float(s["beat_penalty_min"])))
+        owner=owner, risk=curves, vehicles=vlist,
+        unload_s=60.0 * (float(places["landfill"]["unload_min"]) + float(s.get("landfill_queue_min", 0))),
+        params=optimiser.CostParams(beat_penalty=float(s["beat_penalty_min"])),
+        lf_open_ts=lf_open, lf_close_ts=lf_close)
     return Context(prob, net, bins, vehicles, settings, start_ts, shift_end, day, kind, due, st, src, scenario,
-                   excluded, start_notes)
+                   excluded, start_notes, off_road, closures.active(conn, start_ts))
 
 
 def replan_starts(conn, plan: dict, net: roads.Network, now_ts: int, bins: dict,
@@ -323,6 +348,8 @@ def _route_json(ctx: Context, k: int, seq: list[int]) -> dict:
                "drive_min": round(s["drive_s"] / 60, 1), "drive_km": round(s["drive_m"] / 1000, 2),
                "lat": float(net.graph.lat[net.stop_node[s["stop"]]]),
                "lon": float(net.graph.lon[net.stop_node[s["stop"]]])}
+        if s["kind"] == "landfill" and s.get("wait_s"):
+            rec["wait_min"] = round(s["wait_s"] / 60, 1)
         if s["kind"] == "bin":
             b = ctx.bins[sid]
             i = s["bin"]
@@ -396,10 +423,38 @@ def make_alerts(ctx: Context, plan: dict) -> list[dict]:
     if plan["kpis"]["finish_ts"] > ctx.shift_end_ts - 15 * 60 and plan["kpis"]["bins_served"]:
         out.append({"level": "info", "text": "The busiest truck finishes less than 15 minutes before the end of the shift.",
                     "action": "Avoid delays; a breakdown today would leave bins uncollected."})
-    if ctx.excluded:
-        out.append({"level": "info", "text": f"{len(ctx.excluded)} bin(s) already handled today are not in this plan.",
-                    "action": "None.", "bins": sorted(ctx.excluded)})
+    handled = sorted(b for b, why in ctx.excluded.items() if not why.startswith("road closed"))
+    if handled:
+        out.append({"level": "info", "text": f"{len(handled)} bin(s) already handled today are not in this plan.",
+                    "action": "None.", "bins": handled})
+    blocked = sorted(b for b, why in ctx.excluded.items() if why.startswith("road closed"))
+    if blocked:
+        streets = sorted({ctx.excluded[b] for b in blocked})
+        out.append({"level": "warning", "text": f"{len(blocked)} bin(s) cannot be reached: " + "; ".join(streets) + ".",
+                    "action": "Send a hand cart or collect them once the road opens (Settings > Roads).",
+                    "bins": blocked})
+    elif ctx.closed_roads:
+        out.append({"level": "info", "text": "Closed roads avoided: " + ", ".join(
+                    f"{c['street']} (until {closures_until(c)})" for c in ctx.closed_roads) + ".",
+                    "action": "None - routes go around them."})
+    for vid, r in ctx.off_road.items():
+        out.append({"level": "info", "text": f"{vid.replace('TRK-', 'Truck ')} is not planned: {fleet_reason(r)}.",
+                    "action": "The other trucks share its bins; see Settings > Vehicles & depot."})
+    waits = [s for r in plan["routes"] for s in r["stops"] if s["kind"] == "landfill" and s.get("wait_min", 0) >= 5]
+    if waits:
+        out.append({"level": "info", "text": f"{len(waits)} landfill visit(s) wait for the gate to open.",
+                    "action": "None - planned around the landfill opening hours."})
     return out
+
+
+def closures_until(c: dict) -> str:
+    from .closures import until_text
+    return until_text(c["until_ts"])
+
+
+def fleet_reason(r: dict) -> str:
+    from .fleet import reason_text
+    return reason_text(r)
 
 
 def verify_context(ctx: Context) -> dict:
@@ -411,6 +466,7 @@ def verify_context(ctx: Context) -> dict:
         "service_s": dict(zip(prob.bin_ids, prob.service_s)), "unload_s": prob.unload_s,
         "mu": {b: rc.mu[i] for i, b in enumerate(rc.bin_ids)}, "risk_t0": rc.start_ts, "risk_step": rc.step_s,
         "max_fill_pct": prob.params.max_fill_pct, "usable_capacity": prob.params.usable_capacity,
+        "lf_open_ts": prob.lf_open_ts, "lf_close_ts": prob.lf_close_ts,
         "due": {b for b, d in zip(prob.bin_ids, prob.due) if d},
         "shift_end_ts": {v.id: v.end_ts for v in prob.vehicles},
         "start": {v.id: (net.stop_ids[v.start_pos], v.start_ts, v.start_load) for v in prob.vehicles},

@@ -255,13 +255,53 @@ def accuracy_tab(d: dict) -> None:
         st.caption(mm["label"])
 
 
+def crews_tab() -> None:
+    """Crew performance (last 4 weeks) and the monthly summary for NMMC (PDF and spreadsheet)."""
+    from datetime import datetime
+
+    from wastewise import config, pdfs
+    c = conn()
+    st.markdown("**Crew performance, last 4 weeks**")
+    perf = reports.crew_performance(c, db.now())
+    pct = lambda v: "-" if v is None else f"{v:g}%"  # noqa: E731
+    table([{"truck": r["truck"], "visits": f"{r['visits']:,}", "on_time": pct(r["on_time_pct"]),
+            "missed": pct(r["missed_pct"]), "problems": str(r["problems"]), "gps": pct(r["verified_pct"])}
+           for r in perf],
+          [Col("truck", "Truck"), Col("visits", "Visits"), Col("on_time", "On time"), Col("missed", "Missed"),
+           Col("problems", "Problems (not reached / bin missing)"), Col("gps", "GPS-verified taps")])
+    st.caption("On time = collected within the 'late after' minutes of the planned time. Missed = could not reach, "
+               "or planned but never recorded. GPS-verified = taps made within 100 m of the bin."
+               + (" Includes synthetic demonstration history." if any(r["synthetic"] for r in perf) else ""))
+    st.markdown("**Monthly summary for NMMC**")
+    now = datetime.now(config.IST)
+    months = [(now.year - (now.month - k <= 0), (now.month - k - 1) % 12 + 1) for k in range(6)]
+    ym = st.selectbox("Month", months, format_func=lambda m: datetime(m[0], m[1], 1).strftime("%B %Y"))
+    m = reports.monthly_summary(c, *ym)
+    tt = m["totals"]
+    a, b, d, e = st.columns(4)
+    a.metric("Collections", f"{tt['collections']:,}")
+    b.metric("Waste collected", fmt.litres(tt["litres"]))
+    d.metric("Complaints", f"{tt['complaints']}", f"{tt['complaints_closed']} closed", delta_color="off")
+    e.metric("Problems", f"{tt['not_reached'] + tt['missing']}")
+    x, y, _ = st.columns([1, 1, 2])
+    x.download_button("Monthly summary (PDF)", pdfs.monthly_report(m), file_name=f"wastewise_{ym[0]}-{ym[1]:02d}.pdf",
+                      mime="application/pdf", icon=":material/picture_as_pdf:")
+    y.download_button("Day by day (CSV)", reports.monthly_csv(m), file_name=f"wastewise_{ym[0]}-{ym[1]:02d}.csv",
+                      mime="text/csv", icon=":material/download:")
+    if m["synthetic"]:
+        st.caption("This month contains synthetic demonstration data - the PDF says so on every page.")
+
+
 def page() -> None:
     st.title("Reports")
     synthetic_notice()
     c = conn()
     now = db.now() // 600 * 600
     d = _data(db.data_version(c), now)
-    t = st.tabs(["Bin sizes", "When bins fill", "Festivals", "Next 7 days", "Savings", "Forecast accuracy"])
+    t = st.tabs(["Bin sizes", "When bins fill", "Festivals", "Next 7 days", "Savings", "Forecast accuracy",
+                 "Crews & monthly report"])
+    with t[6]:
+        crews_tab()
     with t[0]:
         sizing_tab(d)
     with t[1]:

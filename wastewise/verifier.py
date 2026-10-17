@@ -8,7 +8,8 @@ Checks: every route starts where the truck is and ends at the depot; times
 add up (travel + service/unloading); the truck is never over capacity
 between unloads; it unloads at the landfill before returning; it is back
 before the end of the shift; no bin is visited twice; only active bins and
-trucks are used; every due bin is served or explained; reported totals match.
+trucks are used; every due bin is served or explained; reported totals match; landfill unloading
+happens within the gate hours (a truck arriving early waits).
 """
 from __future__ import annotations
 
@@ -71,6 +72,11 @@ def verify(plan: dict, ctx: dict) -> dict:
                 collected_since_unload = True
                 t += ctx["service_s"][bid]
             elif s["kind"] == "landfill":
+                lf_open, lf_close = ctx.get("lf_open_ts"), ctx.get("lf_close_ts")
+                if lf_open is not None and t < lf_open:
+                    t = lf_open                       # waits at the gate until it opens
+                if lf_close is not None and t > lf_close + TOL_S:
+                    errors.append(f"{vid}: unloads at the landfill after the gate closes")
                 t += ctx["unload_s"]
                 if not collected_since_unload and load <= 0:
                     warnings.append(f"{vid}: landfill visit with an empty truck")

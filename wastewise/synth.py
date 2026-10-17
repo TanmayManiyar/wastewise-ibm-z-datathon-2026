@@ -191,6 +191,11 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
     # Bins collected every few days are split into alternate-day groups, as a ward does to balance the
     # daily load (half of the every-2-days bins on even days, half on odd days).
     multi = sorted(sp.id for sp in specs if sp.every_days > 1)
+    # Some days a truck runs late (traffic, a breakdown, a long landfill queue): about 1 day in 8 the whole
+    # round is 20-90 minutes behind the routine timetable.
+    late_rng = _rng(seed, "late days")
+    late_min = {(v["id"], d): (float(late_rng.uniform(20, 90)) if late_rng.random() < 0.12 else 0.0)
+                for v in vehicles for d in uniq_days}
     group_of = {bid: k for k, bid in enumerate(multi)}
 
     for sp in specs:
@@ -217,24 +222,27 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
             d = dates[i]
             collect_here = False
             due_now = ((d.toordinal() + group) % sp.every_days == 0 or retry) and dow[i] not in sp.rest
-            if hod[i] == hh + (mm + visit_min) // 60 and d < plan_day and due_now:
+            delay = late_min[(truck_of[sp.id], d)]
+            at_min = hh * 60 + mm + visit_min + delay          # minute of the day the truck really comes
+            planned = int(hour_ts[i] + (hh * 60 + mm + visit_min - hod[i] * 60) * 60)
+            if hod[i] == int(at_min // 60) and d < plan_day and due_now:
                 miss_p = 0.06 if calendar_in.is_monsoon(d) else 0.04
                 if r.random() < miss_p:
-                    events.append((int(hour_ts[i] + ((mm + visit_min) % 60) * 60), sp.id, truck_of[sp.id],
-                                   None, "could_not_reach", None, 1, "synthetic", "routine round (synthetic)"))
+                    events.append((planned, sp.id, truck_of[sp.id], None, "could_not_reach", None, 1, "synthetic",
+                                   "routine round (synthetic)", planned))
                     stats["missed"] += 1
                     retry = True      # skipped today; the routine tries again tomorrow
                 else:
                     collect_here = True
             if collect_here:
-                m = (mm + visit_min) % 60 + float(np.clip(r.normal(0, 8), -25, 25))
+                m = at_min % 60 + float(np.clip(r.normal(0, 8), -25, 25))
                 m = float(np.clip(m, 0, 59))
                 before = v + gen[i] * m / 60
                 fill_before = min(before / sp.capacity_l * 100, 100.0)
                 crew_est = float(np.clip(round((fill_before + r.normal(0, 8)) / 25) * 25, 0, 100))
                 ts_c = int(hour_ts[i] + m * 60)
                 events.append((ts_c, sp.id, truck_of[sp.id], None, "collected", crew_est, 1, "synthetic",
-                               "routine round (synthetic)"))
+                               "routine round (synthetic)", planned))
                 stats["collections"] += 1
                 if overflow_since is not None:
                     # Complaints are never closed by the system: a supervisor checks and closes them some
@@ -305,8 +313,8 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
         clear_synthetic(conn)
         conn.executemany("INSERT INTO readings(bin_id, ts, fill_pct, source, synthetic, fault, user, note)"
                          " VALUES (?,?,?,?,?,?,?,?)", readings)
-        conn.executemany("INSERT INTO events(ts, bin_id, vehicle_id, plan_id, kind, fill_before, synthetic, user, note)"
-                         " VALUES (?,?,?,?,?,?,?,?,?)", events)
+        conn.executemany("INSERT INTO events(ts, bin_id, vehicle_id, plan_id, kind, fill_before, synthetic, user, note,"
+                         " planned_ts) VALUES (?,?,?,?,?,?,?,?,?,?)", events)
         conn.executemany("INSERT INTO synthetic_truth(bin_id, ts, fill_pct) VALUES (?,?,?)", truth)
         for c in complaints:
             conn.execute("INSERT INTO complaints(ts, text, lang, bin_id, problem, status, reporter, created_by,"

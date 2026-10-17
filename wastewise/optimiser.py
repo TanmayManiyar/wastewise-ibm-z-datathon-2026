@@ -86,6 +86,13 @@ class Problem:
     vehicles: list[Vehicle]
     unload_s: float
     params: CostParams = field(default_factory=CostParams)
+    lf_open_ts: float | None = None     # landfill gate hours: trucks wait for opening,
+    lf_close_ts: float | None = None    # and may not start unloading after closing
+
+    def _landfill_start(self, arrive: float) -> tuple[float, bool]:
+        """(time unloading starts, gate already closed?)"""
+        t = arrive if self.lf_open_ts is None or arrive >= self.lf_open_ts else self.lf_open_ts
+        return t, self.lf_close_ts is not None and t > self.lf_close_ts
 
     def __post_init__(self):
         self.Tl = self.T.tolist()
@@ -148,6 +155,7 @@ class Problem:
         dist = 0.0
         over = 0.0
         beat = 0
+        closed_hits = 0
         for b in seq:
             sb = STOP[b]
             ta = t + T[pos][sb]
@@ -168,7 +176,9 @@ class Problem:
             if load + lb > cap and load > 0:
                 drive += T[pos][LF]
                 dist += D[pos][LF]
-                t += T[pos][LF] + self.unload_s
+                t, shut = self._landfill_start(t + T[pos][LF])
+                t += self.unload_s
+                closed_hits += shut
                 load = 0.0
                 pos = LF
                 ta = t + T[LF][sb]
@@ -205,13 +215,16 @@ class Problem:
         if load > 0:
             drive += T[pos][LF]
             dist += D[pos][LF]
-            t += T[pos][LF] + self.unload_s
+            t, shut = self._landfill_start(t + T[pos][LF])
+            t += self.unload_s
+            closed_hits += shut
             pos = LF
         if pos != DEP:
             drive += T[pos][DEP]
             dist += D[pos][DEP]
             t += T[pos][DEP]
         cost = p.drive_min * drive / 60.0 + p.per_km * dist / 1000.0 + p.overflow * over + p.beat_penalty * beat
+        cost += p.overtime_fixed * closed_hits          # landfill gate closed: as bad as overtime
         late = t - v.end_ts
         if late > 0:
             cost += p.overtime_fixed + p.overtime_per_min * late / 60.0
@@ -227,6 +240,7 @@ class Problem:
         t, load, pos = v.start_ts, v.start_load, v.start_pos
         drive = dist = over = 0.0
         beat = 0
+        closed_hits = 0
         for b in seq:
             sb = self.bin_stop[b]
             ta = t + T[pos][sb]
@@ -234,7 +248,9 @@ class Problem:
             if load + lb > cap and load > 0:
                 drive += T[pos][LF]
                 dist += D[pos][LF]
-                t += T[pos][LF] + self.unload_s
+                t, shut = self._landfill_start(t + T[pos][LF])
+                t += self.unload_s
+                closed_hits += shut
                 load, pos = 0.0, LF
                 ta = t + T[LF][sb]
                 lb = self.load_at(b, ta)
@@ -250,13 +266,16 @@ class Problem:
         if load > 0:
             drive += T[pos][LF]
             dist += D[pos][LF]
-            t += T[pos][LF] + self.unload_s
+            t, shut = self._landfill_start(t + T[pos][LF])
+            t += self.unload_s
+            closed_hits += shut
             pos = LF
         if pos != DEP:
             drive += T[pos][DEP]
             dist += D[pos][DEP]
             t += T[pos][DEP]
         cost = p.drive_min * drive / 60.0 + p.per_km * dist / 1000.0 + p.overflow * over + p.beat_penalty * beat
+        cost += p.overtime_fixed * closed_hits          # landfill gate closed: as bad as overtime
         late = t - v.end_ts
         if late > 0:
             cost += p.overtime_fixed + p.overtime_per_min * late / 60.0
@@ -284,9 +303,11 @@ class Problem:
             nonlocal t, load, pos, n_lf
             dt, dm = leg(pos, LF)
             arrive = t + dt
-            stops.append({"kind": "landfill", "stop": LF, "arrive_ts": arrive, "depart_ts": arrive + self.unload_s,
+            start, shut = self._landfill_start(arrive)
+            stops.append({"kind": "landfill", "stop": LF, "arrive_ts": arrive, "depart_ts": start + self.unload_s,
+                          "wait_s": start - arrive, "gate_closed": shut,
                           "load_before_l": load, "load_after_l": 0.0, "drive_s": dt, "drive_m": dm})
-            t = arrive + self.unload_s
+            t = start + self.unload_s
             load = 0.0
             pos = LF
             n_lf += 1

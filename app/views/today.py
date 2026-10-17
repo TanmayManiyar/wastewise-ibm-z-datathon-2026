@@ -257,7 +257,9 @@ def route_rows(route: dict) -> list[dict]:
                          "map": (s["lat"], s["lon"]), "kind": "bin"})
         elif s["kind"] == "landfill":
             rows.append({"n": "🚛", "time": hhmm(s["arrive_ts"]), "place": "Turbhe landfill - unload",
-                         "street": f"about {duration((s['depart_ts'] - s['arrive_ts']) / 60)}", "fill": None,
+                         "street": f"about {duration((s['depart_ts'] - s['arrive_ts']) / 60)}"
+                                   + (f" (waits {duration(s['wait_min'])} for the gate)" if s.get("wait_min") else ""),
+                         "fill": None,
                          "status": ("Unload", "blue"), "map": (s["lat"], s["lon"]), "kind": "landfill"})
         else:
             rows.append({"n": "🏁", "time": hhmm(s["arrive_ts"]), "place": "Back at the depot", "street": "",

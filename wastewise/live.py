@@ -76,6 +76,31 @@ def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
                         "text": f"{r['vehicle_name']} at {r['landmark']}: {STATUS_TEXT[r['status']]}"
                                 + (f" ({r['delay_min']} min)" if r["delay_min"] else ""),
                         "action": r["action"]})
+    # Closed roads and trucks out of service that affect today's approved plan.
+    from . import closures, fleet
+    main_ = planner.current(conn, day)
+    if main_ and main_["status"] == "approved":
+        cl = closures.active(conn, now_ts)
+        blocked = closures.unreachable_bins(conn, now_ts)
+        planned = {s["bin_id"] for r in main_["routes"] for s in r["stops"] if s["kind"] == "bin"}
+        hit = sorted(planned & set(blocked))
+        using = closures.routes_using(main_, [c for c in cl if c["created_at"] > main_["created_at"]])
+        if hit or using:
+            streets = sorted({blocked[b]["street"] for b in hit} | {s for v in using.values() for s in v})
+            names = ", ".join(r["vehicle_name"] for r in main_["routes"] if r["vehicle_id"] in using)
+            out.append({"level": "warning", "kind": "closure", "ts": now_ts,
+                        "text": f"Road closed: {', '.join(streets)}"
+                                + (f" - {len(hit)} planned bin(s) cannot be reached" if hit else "")
+                                + (f" - {names} route(s) use it" if names else "") + ".",
+                        "action": "Use Re-plan from now during the shift (it avoids the closed road), or generate "
+                                  "the plan again before the shift."})
+        off = fleet.out_of_service(conn, now_ts)
+        for r in main_["routes"]:
+            if r["vehicle_id"] in off and r["totals"]["bins"]:
+                out.append({"level": "critical", "kind": "vehicle", "ts": now_ts,
+                            "text": f"{r['vehicle_name']} is out of service ({fleet.reason_text(off[r['vehicle_id']])}) "
+                                    "but has a route today.",
+                            "action": "Re-plan from now so the other trucks take its bins, or send the spare vehicle."})
     # Evening round: recommended but not planned yet.
     main = planner.current(conn, day)
     if main and main["status"] == "approved" and planner.current(conn, day, round_="extra") is None:

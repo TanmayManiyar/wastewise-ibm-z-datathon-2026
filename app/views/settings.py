@@ -452,13 +452,70 @@ def ai_tab() -> None:
 
 
 def page() -> None:
+    from views import roads_view
     st.title("Settings")
-    t = st.tabs(["Settings & data", "Vehicles & depot", "Users", "AI"])
+    t = st.tabs(["Settings & data", "Vehicles & depot", "Roads", "Users", "AI"])
     with t[0]:
         settings_tab()
     with t[1]:
         fleet_tab()
+        truck_log()
     with t[2]:
-        users_tab()
+        roads_view.tab()
     with t[3]:
+        users_tab()
+    with t[4]:
         ai_tab()
+
+
+def truck_log() -> None:
+    """Fuel, maintenance and breakdowns. 'Out of service until' keeps the truck out of the plans."""
+    from datetime import datetime, timedelta
+
+    from wastewise import config, fleet
+    c = conn()
+    st.markdown("**Truck log** (fuel, maintenance, breakdowns)")
+    vs = {v["id"]: v["name"] for v in db.vehicles(c, active_only=False)}
+    off = fleet.out_of_service(c, db.now())
+    if off:
+        for vid, r in off.items():
+            st.warning(f"**{vs.get(vid, vid)}** is out of service: {fleet.reason_text(r)}. Plans leave it out.",
+                       icon=":material/build:")
+    rows = fleet.entries(c, limit=60)
+    if rows:
+        table([{"when": when(r["ts"]), "truck": vs.get(r["vehicle_id"], r["vehicle_id"]),
+                "what": fleet.KINDS.get(r["kind"], r["kind"]),
+                "fuel": fmt.litres(r["litres"]) if r["litres"] else "",
+                "cost": f"Rs {r['cost_rs']:,.0f}" if r["cost_rs"] else "",
+                "km": f"{r['odometer_km']:,.0f} km" if r["odometer_km"] else "",
+                "out": (f"out of service until {when(r['out_until'])}" if r["out_until"] else
+                        "out of service" if r["out_from"] else ""),
+                "note": r["note"] or "", "who": r["user"] or ""} for r in rows],
+              [Col("when", "When"), Col("truck", "Truck"), Col("what", "What"), Col("fuel", "Diesel"),
+               Col("cost", "Cost"), Col("km", "Odometer"), Col("out", "Service"), Col("note", "Note"),
+               Col("who", "By")], max_height=320)
+    if not can("edit_fleet") and not can("edit_bins"):
+        return
+    with st.form("truck_log", clear_on_submit=True):
+        a, b = st.columns(2)
+        vid = a.selectbox("Truck", list(vs), format_func=vs.get)
+        kind = b.radio("What", list(fleet.KINDS), format_func=fleet.KINDS.get, horizontal=True)
+        a, b, d = st.columns(3)
+        litres = a.number_input("Diesel (litres)", 0.0, 500.0, 0.0, 1.0)
+        cost = b.number_input("Cost (Rs)", 0.0, 1e6, 0.0, 100.0)
+        odo = d.number_input("Odometer (km)", 0.0, 1e7, 0.0, 1.0)
+        note = st.text_input("Note", placeholder="e.g. brake repair, tyre change")
+        a, b, d = st.columns(3)
+        out = a.checkbox("Out of service from now")
+        now = datetime.now(config.IST)
+        until_d = b.date_input("until (date)", value=(now + timedelta(days=1)).date())
+        until_t = d.time_input("until (time)", value=datetime.strptime("06:00", "%H:%M").time(), step=1800)
+        if st.form_submit_button("Save to the log", type="primary"):
+            try:
+                until = int(datetime.combine(until_d, until_t, tzinfo=config.IST).timestamp()) if out else None
+                fleet.add(c, vid, kind, user()["username"], litres or None, cost or None, odo or None, note,
+                          out_from=db.now() if out else None, out_until=until)
+                mark_seen()
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
