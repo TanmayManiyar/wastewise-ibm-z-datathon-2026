@@ -35,3 +35,31 @@ Snap ML picks its accelerator build (`libsnapmllocal3_zdnn`) only if
 mode. IBM Snap ML will not leverage NNPA."* Installing `libzdnn0` fixed this
 on this VM. `wastewise.platform_info` reports the machine type, the `nnpa`
 flag and the zDNN check, and the UI header shows the result.
+
+| LightGBM 4.7.0, XGBoost 3.4.1 | Built from source with `pip install --no-binary` (gcc 13, about 10 min together) |
+
+## Telum benchmark (measured on the VM, 17 Oct 2026)
+
+`scripts/benchmark_telum.py` runs the forecaster's LightGBM trees (152 trees, 18
+features) through IBM Snap ML 1.17.2 and writes `evidence/telum_<host>.json`.
+`optimized_tree_format_` confirms `zdnn_tensors` really is used on the accelerator.
+
+| Engine (3 threads) | 720 rows (one planning run) | 200 000 rows |
+|---|---|---|
+| native LightGBM, CPU | about 1.8 ms | 409 ms |
+| Snap ML `compress_trees`, CPU | **0.93 ms** | **261 ms** |
+| Snap ML `zdnn_tensors`, Telum accelerator | 3.9 ms | 1031 ms |
+
+Size sweep (LightGBM, 100 000 rows, ms): depth 4/100 trees: native 127, Snap CPU 25,
+Telum 359. Depth 6/500: 771 / 196 / 937. Depth 8/500: 1013 / 274 / 1161.
+
+**Result: on this z/VM guest, with zDNN 1.0.1 from Ubuntu, the accelerator path was
+slower than Snap ML on the CPU for every model size tried.** The gap narrows as
+models get larger. Predictions agree with native LightGBM (mean absolute difference
+below 0.001 %/h; the largest difference, 0.26, comes from float32 input rounding at
+split thresholds). WasteWise therefore defaults to `auto`: it times both engines when
+the model loads, uses the faster one, and shows which in the header. Settings > AI
+can force the accelerator.
+
+Snap ML 1.17.2 could not import XGBoost 3.4 JSON models ("no objective defined"),
+so the forecaster exports its gradient-boosted trees from LightGBM.

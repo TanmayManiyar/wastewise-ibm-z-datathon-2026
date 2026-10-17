@@ -29,6 +29,11 @@ def main() -> None:
     X, _, _, _ = forecast.dataset(forecast.sanpada_series(conn, end - 30 * 86400, end))
     res = telum.benchmark(model, Path(cur["path"]), X)
     res["model_id"] = cur["id"]
+    print("Sweeping model sizes ...")
+    Xs, ys, _, _ = forecast.dataset(forecast.sanpada_series(conn, end - 60 * 86400, end))
+    res["size_sweep"] = telum.sweep(Xs, ys)
+    for r in res["size_sweep"]:
+        print(r)
     res["note"] = ("batch_720 = one planning run (30 sensor bins x 24 hourly leads); "
                    "batch_20000 = bulk scoring")
     ev = ROOT / "evidence"
