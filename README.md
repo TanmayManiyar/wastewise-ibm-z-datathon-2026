@@ -59,7 +59,9 @@ leptospirosis and blocked drains. Trucks have a fixed capacity and shift, so the
   - REST ingestion API protected by an API key.
 - **Reports**: bin sizing, weekday x hour patterns, festival effect, 7-day outlook against fleet capacity,
   savings against the routine, and forecast accuracy.
-- **Local IBM Granite** through a llama.cpp server on the same machine: the pre-shift briefing, driver
+- **Local IBM Granite** through a llama.cpp server on the same machine (built on s390x and tested with the
+  big-endian Granite 4.0 H 350M *base* model, about 5.7 tokens/s; a base model does not follow
+  instructions, so its texts are rejected by the check and the templates are shown): the pre-shift briefing, driver
   messages in English, Hindi and Marathi, and help locating the place in a complaint. **Every number, time
   and bin the model writes is checked against the plan.** If anything doesn't match, the checked template is
   shown instead and the reason is displayed.
@@ -98,17 +100,18 @@ big-endian, 3 vCPUs, Ubuntu 24.04, Python 3.12. Details and raw numbers are in
 - **No PyPI s390x wheels** for numpy, scipy, pandas, scikit-learn, pyarrow, LightGBM or XGBoost. The
   scientific stack comes from Ubuntu's s390x packages, and pyarrow 24.0.0 (needed by Streamlit) is built
   from the verified Apache source in about 7 min. LightGBM and XGBoost are built from source.
-- The test suite passed on s390x (83 tests at commit `608ca10`).
+- **All 90 tests pass on s390x**; see [evidence/ibm-datathon1-20261017T094104Z](evidence/ibm-datathon1-20261017T094104Z)
+  (captured by `scripts/capture_evidence.sh`, with SHA-256 checksums).
 - Results came out identical on x86 and s390x: the synthetic generator produced the same 147 839 readings
   on both, and the forecaster's test errors match.
-- Road network build: 0.33 s. Optimiser: about 1 040 ALNS iterations in 7 s (763 on the development
-  laptop). Forecaster training: 12 s.
+- Road network build (7 634 nodes): 0.32 s. A full plan: 8.5 s including 1 048 ALNS iterations (763 on the
+  development laptop), verified independently. Forecaster training: 11 s.
 - **Telum**:
   - The `nnpa` CPU flag is present and IBM zDNN 1.0.1 reports the accelerator as usable.
   - Snap ML had silently fallen back to the CPU until `libzdnn0` was installed.
   - **Measured result**: on this z/VM guest, Snap ML's accelerator path (`zdnn_tensors`) was *slower* than
     Snap ML on the CPU (`compress_trees`) for every LightGBM model size tried. For a planning batch
-    (720 rows) it took 3.9 ms against 0.93 ms.
+    (720 rows, all 3 threads) it took 1.45 ms against 0.78 ms (native LightGBM: 1.28 ms).
   - WasteWise therefore times both engines when the model loads, uses the faster one, and shows which in
     the header. *Settings > AI* can force the accelerator. We don't claim a Telum speed-up we didn't measure.
 
@@ -160,6 +163,7 @@ bash scripts/services.sh start                  # web app :8501 and REST API :86
 - **Container** (multi-arch, Podman on s390x): `podman build -t wastewise -f Containerfile .`
 - **Granite**: `bash scripts/vm_setup_granite.sh /path/to/granite.gguf`. It builds llama.cpp, converts the
   model to big-endian if needed, and serves it on 127.0.0.1:8080.
+- **Public link** (no firewall change): `bash scripts/vm_cloudflare_tunnel.sh` prints an `https://….trycloudflare.com` address.
 - **Demo data**: `python -m wastewise.cli refresh-demo` (or *Settings > Refresh demo data to now*) moves the
   synthetic history up to the present. Manual records, settings, bins, trucks and users are kept.
 
@@ -176,6 +180,10 @@ bash scripts/services.sh start                  # web app :8501 and REST API :86
   demonstration values to be set by the ward.
 - The Telum accelerator didn't speed up these small tree ensembles on the shared z/VM guest (measured above).
 - Reloading the browser page signs you out, since Streamlit sessions don't use cookies.
+- The available Granite model is a *base* model: on the VM its briefings fail the figure check, so the
+  templates are used. An instruction-tuned Granite GGUF (converted to big-endian) is needed for fluent text.
+- The public demo link is a Cloudflare *quick tunnel* (random `trycloudflare.com` address, no uptime
+  guarantee); a named tunnel or an opened port is needed for permanent access.
 
 ## Project layout
 

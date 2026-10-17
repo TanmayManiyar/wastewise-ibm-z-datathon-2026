@@ -1,0 +1,15 @@
+{
+  "arch": "s390x",
+  "byteorder": "big",
+  "is_s390x": true,
+  "machine_type": "9175",
+  "machine_name": "IBM z17 family, Telum II",
+  "cpu_model_name": "-",
+  "nnpa_feature": true,
+  "telum": true,
+  "zdnn": "1.0.1",
+  "nnpa_usable": true,
+  "reason": null,
+  "python": "3.12.3",
+  "system": "Linux 6.8.0-124-generic"
+}

@@ -1,0 +1,11 @@
+python 3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+numpy      1.26.4  /usr/lib/python3/dist-packages/numpy/__init__.py
+scipy      1.11.4  /usr/lib/python3/dist-packages/scipy/__init__.py
+pandas     2.1.4  /usr/lib/python3/dist-packages/pandas/__init__.py
+sklearn    1.4.1.post1  /usr/lib/python3/dist-packages/sklearn/__init__.py
+pyarrow    24.0.0  /home/linux1/wastewise/.venv/lib/python3.12/site-packages/pyarrow/__init__.py
+streamlit  1.66.0  /home/linux1/wastewise/.venv/lib/python3.12/site-packages/streamlit/__init__.py
+plotly     7.1.0  /home/linux1/wastewise/.venv/lib/python3.12/site-packages/plotly/__init__.py
+lightgbm   4.7.0  /home/linux1/wastewise/.venv/lib/python3.12/site-packages/lightgbm/__init__.py
+xgboost    3.4.1  /home/linux1/wastewise/.venv/lib/python3.12/site-packages/xgboost/__init__.py
+snapml     ?  /home/linux1/wastewise/.venv/lib/python3.12/site-packages/snapml/__init__.py

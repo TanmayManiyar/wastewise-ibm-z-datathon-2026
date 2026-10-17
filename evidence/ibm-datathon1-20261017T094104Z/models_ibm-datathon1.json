@@ -1,0 +1,178 @@
+{
+  "machine": {
+    "arch": "s390x",
+    "byteorder": "big",
+    "is_s390x": true,
+    "machine_type": "9175",
+    "machine_name": "IBM z17 family, Telum II",
+    "cpu_model_name": "-",
+    "nnpa_feature": true,
+    "telum": true,
+    "zdnn": "1.0.1",
+    "nnpa_usable": true,
+    "reason": null,
+    "python": "3.12.3",
+    "system": "Linux 6.8.0-124-generic"
+  },
+  "forecaster": {
+    "label": "trained and tested on SYNTHETIC demonstration data",
+    "rows": {
+      "train": 158575,
+      "validation": 51565,
+      "test": 49670
+    },
+    "test_window": {
+      "val_start": "2026-08-09T03:06:00+05:30",
+      "test_start": "2026-09-12T16:18:00+05:30",
+      "test_end": "2026-10-17T05:30:00+05:30"
+    },
+    "test": {
+      "hgb": {
+        "mae_3h_points": 3.743,
+        "rmse_3h_points": 5.266,
+        "bias_3h_points": 0.716
+      },
+      "gbt": {
+        "mae_3h_points": 3.675,
+        "rmse_3h_points": 5.118,
+        "bias_3h_points": 0.635
+      },
+      "ensemble": {
+        "mae_3h_points": 3.697,
+        "rmse_3h_points": 5.167,
+        "bias_3h_points": 0.675
+      },
+      "same_hour_last_7_days": {
+        "mae_3h_points": 4.153,
+        "rmse_3h_points": 6.064,
+        "bias_3h_points": -0.157
+      },
+      "mean_rate_last_7_days": {
+        "mae_3h_points": 7.164,
+        "rmse_3h_points": 9.278,
+        "bias_3h_points": 0.06
+      },
+      "last_24_hours": {
+        "mae_3h_points": 7.474,
+        "rmse_3h_points": 9.97,
+        "bias_3h_points": 0.436
+      }
+    },
+    "gbt_library": "lightgbm",
+    "hgb_iterations": 150,
+    "gbt_iterations": 94,
+    "train_seconds": 11.4,
+    "best_model": "gbt",
+    "decision": {
+      "new_mae": 3.675,
+      "best_baseline_mae": 4.153,
+      "current_promoted_mae": 3.701,
+      "promoted": true
+    },
+    "gbt_export": {
+      "file": "gbt_lightgbm.txt",
+      "format": "lightgbm"
+    }
+  },
+  "anomaly": {
+    "label": "evaluated on SYNTHETIC fault labels",
+    "days": 60,
+    "recall_by_type": {
+      "stuck": 0.988,
+      "drift": 0.12,
+      "spike": 0.719
+    },
+    "rules": {
+      "precision": 0.661,
+      "recall": 0.221
+    },
+    "iforest": {
+      "precision": 0.315,
+      "recall": 0.155
+    },
+    "combined": {
+      "precision": 0.384,
+      "recall": 0.274
+    }
+  },
+  "mildura": {
+    "label": "REAL data: Mildura Rural City Council smart bins (data.gov.au, CC BY 3.0 AU)",
+    "devices": [
+      "mil-bin01",
+      "mil-bin02",
+      "mil-bin03",
+      "mil-bin04"
+    ],
+    "rows": {
+      "train": 41041,
+      "validation": 12370,
+      "test": 15805
+    },
+    "test_window": {
+      "val_start": "2022-09-25",
+      "test_start": "2022-12-28",
+      "test_end": "2023-04-01"
+    },
+    "test": {
+      "hgb": {
+        "mae_3h_points": 2.939,
+        "rmse_3h_points": 4.759,
+        "bias_3h_points": 0.336
+      },
+      "gbt": {
+        "mae_3h_points": 2.73,
+        "rmse_3h_points": 4.541,
+        "bias_3h_points": -0.015
+      },
+      "ensemble": {
+        "mae_3h_points": 2.805,
+        "rmse_3h_points": 4.59,
+        "bias_3h_points": 0.16
+      },
+      "same_hour_last_7_days": {
+        "mae_3h_points": 3.014,
+        "rmse_3h_points": 5.057,
+        "bias_3h_points": 0.007
+      },
+      "mean_rate_last_7_days": {
+        "mae_3h_points": 2.944,
+        "rmse_3h_points": 4.677,
+        "bias_3h_points": -0.001
+      },
+      "last_24_hours": {
+        "mae_3h_points": 3.098,
+        "rmse_3h_points": 4.94,
+        "bias_3h_points": 0.022
+      }
+    },
+    "gbt_library": "lightgbm",
+    "transfer_from_sanpada_model": {
+      "sanpada_hgb": {
+        "mae_3h_points": 3.387,
+        "rmse_3h_points": 4.935,
+        "bias_3h_points": 1.084
+      },
+      "sanpada_gbt": {
+        "mae_3h_points": 3.543,
+        "rmse_3h_points": 5.011,
+        "bias_3h_points": 1.387
+      },
+      "sanpada_ensemble": {
+        "mae_3h_points": 3.457,
+        "rmse_3h_points": 4.952,
+        "bias_3h_points": 1.236
+      }
+    },
+    "provenance": {
+      "dataset": "Mildura RRC Smart Bin Fill Levels",
+      "publisher": "Mildura Rural City Council",
+      "licence": "Creative Commons Attribution 3.0 Australia",
+      "page": "https://data.gov.au/data/dataset/mildura-rrc-smart-bin-fill-levels",
+      "resource_url": "https://data.gov.au/data/dataset/cd13c3f7-9dc6-48d7-a48b-8b3036cf0772/resource/b5e11aa0-6beb-4bd3-b164-20c4c01dc780/download/mildura-bin-sensor-data.csv",
+      "resource_last_modified": "2023-09-14T00:00:00",
+      "downloaded_at": 1792217980,
+      "bytes": 3765864,
+      "sha256": "f91830ec2a52b505db9344199bf83e4393fd30dbbc1a6b5e28d84bb1b3aa156e"
+    }
+  }
+}

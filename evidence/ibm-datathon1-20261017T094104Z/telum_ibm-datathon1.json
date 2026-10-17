@@ -1,0 +1,91 @@
+{
+  "snapml": "1.17.2",
+  "accelerator_available": true,
+  "rows_compared": 33737,
+  "trees": 94,
+  "machine": {
+    "arch": "s390x",
+    "byteorder": "big",
+    "is_s390x": true,
+    "machine_type": "9175",
+    "machine_name": "IBM z17 family, Telum II",
+    "cpu_model_name": "-",
+    "nnpa_feature": true,
+    "telum": true,
+    "zdnn": "1.0.1",
+    "nnpa_usable": true,
+    "reason": null,
+    "python": "3.12.3",
+    "system": "Linux 6.8.0-124-generic"
+  },
+  "engines": {
+    "native lightgbm (CPU)": {
+      "batch_720_ms_median": 1.279,
+      "batch_720_rows_per_s": 562936,
+      "batch_20000_ms_median": 27.184,
+      "batch_20000_rows_per_s": 735716,
+      "max_abs_diff_vs_native": 0.0,
+      "mean_abs_diff_vs_native": 0.0
+    },
+    "Snap ML compress_trees (CPU)": {
+      "batch_720_ms_median": 0.78,
+      "batch_720_rows_per_s": 922803,
+      "batch_20000_ms_median": 22.743,
+      "batch_20000_rows_per_s": 879380,
+      "max_abs_diff_vs_native": 0.15962,
+      "mean_abs_diff_vs_native": 0.000477
+    },
+    "Snap ML zdnn_tensors (Telum accelerator)": {
+      "batch_720_ms_median": 1.445,
+      "batch_720_rows_per_s": 498335,
+      "batch_20000_ms_median": 39.878,
+      "batch_20000_rows_per_s": 501532,
+      "max_abs_diff_vs_native": 0.15962,
+      "mean_abs_diff_vs_native": 0.000477
+    }
+  },
+  "model_id": 3,
+  "size_sweep": [
+    {
+      "max_depth": 4,
+      "trees": 100,
+      "rows": 100000,
+      "native_lightgbm_cpu_ms": 125.1,
+      "snapml_cpu_ms": 24.7,
+      "snapml_telum_ms": 284.0
+    },
+    {
+      "max_depth": 6,
+      "trees": 200,
+      "rows": 100000,
+      "native_lightgbm_cpu_ms": 299.7,
+      "snapml_cpu_ms": 73.9,
+      "snapml_telum_ms": 676.4
+    },
+    {
+      "max_depth": 6,
+      "trees": 500,
+      "rows": 100000,
+      "native_lightgbm_cpu_ms": 731.9,
+      "snapml_cpu_ms": 194.9,
+      "snapml_telum_ms": 910.8
+    },
+    {
+      "max_depth": 8,
+      "trees": 500,
+      "rows": 100000,
+      "native_lightgbm_cpu_ms": 997.6,
+      "snapml_cpu_ms": 269.0,
+      "snapml_telum_ms": 1221.6
+    },
+    {
+      "max_depth": 10,
+      "trees": 300,
+      "rows": 100000,
+      "native_lightgbm_cpu_ms": 775.6,
+      "snapml_cpu_ms": 232.0,
+      "snapml_telum_ms": 1489.5
+    }
+  ],
+  "note": "batch_720 = one planning run (30 sensor bins x 24 hourly leads); batch_20000 = bulk scoring"
+}

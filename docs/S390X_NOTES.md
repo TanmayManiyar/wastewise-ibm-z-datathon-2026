@@ -61,5 +61,17 @@ split thresholds). WasteWise therefore defaults to `auto`: it times both engines
 the model loads, uses the faster one, and shows which in the header. Settings > AI
 can force the accelerator.
 
+Re-measured in `evidence/ibm-datathon1-20261017T094104Z/telum_ibm-datathon1.json` with every engine
+using all 3 threads (720 rows / 20 000 rows): native LightGBM 1.28 / 27.2 ms, Snap ML CPU 0.78 / 22.7 ms,
+Snap ML Telum 1.45 / 39.9 ms. The CPU is still faster.
+
+## Other s390x build notes
+
+- **llama.cpp** (for IBM Granite) picks `-march=arch15` on a z17, which gcc 13 does not know;
+  `scripts/vm_setup_granite.sh` builds for `z16` instead. The supplied
+  `granite-4.0-h-350m-base-be.f16.gguf` is already big-endian and loads and generates (about 5.7 tokens/s).
+- **cloudflared** has no s390x release binary; `scripts/vm_cloudflare_tunnel.sh` builds release 2026.10.1
+  from source with the official Go 1.27.2 linux-s390x toolchain (checksum verified).
+
 Snap ML 1.17.2 could not import XGBoost 3.4 JSON models ("no objective defined"),
 so the forecaster exports its gradient-boosted trees from LightGBM.

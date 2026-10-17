@@ -32,7 +32,7 @@ class Engine:
     timings_ms: dict | None = None
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        return np.asarray(self.model.predict(np.ascontiguousarray(X, dtype=np.float32), n_jobs=os.cpu_count()))
+        return np.asarray(self.model.predict(np.ascontiguousarray(X, dtype=np.float32)))
 
 
 def _time(fn, X, repeats=3) -> float:
@@ -64,6 +64,10 @@ def load_snapml(path: Path, kind: str, tree_format: str):
         import snapml
     m = snapml.BoostingMachineRegressor()
     m.import_model(str(path), kind, tree_format=tree_format)
+    try:
+        m.set_params(n_jobs=os.cpu_count())   # use all cores (predict(n_jobs=...) is deprecated)
+    except Exception:
+        pass
     return m
 
 
@@ -107,13 +111,13 @@ def benchmark(model, model_dir: Path, X: np.ndarray, repeats: int = 7, batch_siz
     if info["snapml"]:
         try:
             m = load_snapml(path, kind, "compress_trees")
-            engines["Snap ML compress_trees (CPU)"] = lambda A, m=m: m.predict(A, n_jobs=os.cpu_count())
+            engines["Snap ML compress_trees (CPU)"] = lambda A, m=m: m.predict(A)
         except Exception as exc:
             info["compress_trees_error"] = str(exc)
         if info["accelerator_available"]:
             try:
                 m = load_snapml(path, kind, "zdnn_tensors")
-                engines["Snap ML zdnn_tensors (Telum accelerator)"] = lambda A, m=m: m.predict(A, n_jobs=os.cpu_count())
+                engines["Snap ML zdnn_tensors (Telum accelerator)"] = lambda A, m=m: m.predict(A)
             except Exception as exc:
                 info["zdnn_error"] = str(exc)
     results = {}
@@ -156,9 +160,9 @@ def sweep(X: np.ndarray, y: np.ndarray, configs=((4, 100), (6, 200), (6, 500), (
                "native_lightgbm_cpu_ms": round(_time(m.predict, B), 1)}
         if snapml_version():
             s = load_snapml(p, "lightgbm", "compress_trees")
-            row["snapml_cpu_ms"] = round(_time(lambda A: s.predict(A, n_jobs=os.cpu_count()), B), 1)
+            row["snapml_cpu_ms"] = round(_time(lambda A: s.predict(A), B), 1)
             if accelerator_available():
                 z = load_snapml(p, "lightgbm", "zdnn_tensors")
-                row["snapml_telum_ms"] = round(_time(lambda A: z.predict(A, n_jobs=os.cpu_count()), B), 1)
+                row["snapml_telum_ms"] = round(_time(lambda A: z.predict(A), B), 1)
         out.append(row)
     return out

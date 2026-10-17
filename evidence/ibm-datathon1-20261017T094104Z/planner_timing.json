@@ -1,0 +1,62 @@
+{
+  "label": "planning on SYNTHETIC demonstration data",
+  "road_network": {
+    "nodes": 7634,
+    "edges": 13836,
+    "stops": 52,
+    "build_seconds": 0.32
+  },
+  "plan_seconds_total": 8.49,
+  "solver": {
+    "iterations": 1048,
+    "seconds": 6.86,
+    "initial_cost": 2490.6,
+    "best_cost": 1018.7,
+    "improvements": 21,
+    "operator_weights": {
+      "destroy": {
+        "destroy_random": 6.68,
+        "destroy_worst": 4.08,
+        "destroy_related": 6.45,
+        "destroy_segment": 7.09,
+        "destroy_offbeat": 5.02
+      },
+      "repair": {
+        "repair_greedy": 4.91,
+        "repair_regret": 8.02,
+        "repair_noisy": 4.05
+      }
+    },
+    "seed": 1
+  },
+  "verifier_ok": true,
+  "forecast_source": "ML forecaster (gbt, model #1) - tree inference on CPU (Snap ML compressed trees)",
+  "kpis": {
+    "bins_served": 45,
+    "due_left_out": 0,
+    "litres": 36913,
+    "distance_km": 70.62,
+    "drive_min": 211.8,
+    "fuel_l": 24.72,
+    "co2_kg": 66.2,
+    "expected_overflow_min": 165.0,
+    "expected_overflow_min_left_out": 0,
+    "bins_full_on_arrival": 10,
+    "landfill_trips": 5,
+    "finish_ts": 1792295807
+  },
+  "baseline_routine": {
+    "bins_served": 45,
+    "due_left_out": 0,
+    "litres": 37023,
+    "distance_km": 102.48,
+    "drive_min": 287.9,
+    "fuel_l": 35.87,
+    "co2_kg": 96.1,
+    "expected_overflow_min": 539.0,
+    "expected_overflow_min_left_out": 0,
+    "bins_full_on_arrival": 12,
+    "landfill_trips": 7,
+    "finish_ts": 1792295643
+  }
+}
