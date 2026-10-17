@@ -2,7 +2,7 @@
 
 Telum (the processor with the on-chip Integrated Accelerator for AI) ships in
 IBM z16 / LinuxONE 4 (machine types 3931, 3932) and IBM z17 / LinuxONE 5
-(9175, 9176, Telum II). Linux reports the accelerator as the ``nnpa``
+(9175, Telum II). Linux reports the accelerator as the ``nnpa``
 (Neural Network Processing Assist) CPU feature, which is the authoritative
 check; the machine type is reported alongside it.
 """
@@ -19,9 +19,9 @@ MACHINE_TYPES = {
     "3906": "IBM z14", "3907": "IBM z14 ZR1 / LinuxONE Rockhopper II",
     "8561": "IBM z15 T01 / LinuxONE III LT1", "8562": "IBM z15 T02 / LinuxONE III LT2",
     "3931": "IBM z16 A01 / LinuxONE Emperor 4", "3932": "IBM z16 A02 / LinuxONE Rockhopper 4",
-    "9175": "IBM z17 ME1 / LinuxONE Emperor 5", "9176": "IBM z17 / LinuxONE 5",
+    "9175": "IBM z17 family, Telum II",
 }
-TELUM_TYPES = {"3931", "3932", "9175", "9176"}
+TELUM_TYPES = {"3931", "3932", "9175"}
 
 
 def _read(path: str) -> str:

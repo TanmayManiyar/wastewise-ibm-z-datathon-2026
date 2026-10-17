@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS complaints (
     bin_id TEXT REFERENCES bins(id),
     original_bin_id TEXT,          -- kept when a report is moved to another bin
     problem TEXT,
-    status TEXT NOT NULL DEFAULT 'open',
+    status TEXT NOT NULL DEFAULT 'open',   -- new (place not yet confirmed) | open | resolved
     reporter TEXT,
     created_by TEXT,
     resolved_by TEXT,
@@ -288,13 +288,14 @@ def places(conn: sqlite3.Connection) -> dict[str, dict]:
 
 
 def add_reading(conn: sqlite3.Connection, bin_id: str, fill_pct: float | None, source: str,
-                ts: int | None = None, user: str | None = None, note: str | None = None) -> int:
+                ts: int | None = None, user: str | None = None, note: str | None = None,
+                synthetic: bool = False) -> int:
     if fill_pct is not None:
         fill_pct = max(0.0, min(100.0, float(fill_pct)))
     cur = conn.execute(
         "INSERT INTO readings(bin_id, ts, fill_pct, source, synthetic, user, note) "
-        "VALUES (?, ?, ?, ?, 0, ?, ?)",
-        (bin_id, ts or now(), fill_pct, source, user, note))
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (bin_id, ts or now(), fill_pct, source, int(synthetic), user, note))
     bump_version(conn)
     return int(cur.lastrowid)
 
