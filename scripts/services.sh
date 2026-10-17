@@ -17,7 +17,9 @@ start_one() {  # name, command...
     if [ -f "$RUN/$name.pid" ] && kill -0 "$(cat "$RUN/$name.pid")" 2>/dev/null; then
         echo "$name already running (pid $(cat "$RUN/$name.pid"))"; return
     fi
-    (cd "$APP_DIR" && nohup "$@" >> "$RUN/$name.log" 2>&1 < /dev/null & echo $! > "$RUN/$name.pid")
+    cd "$APP_DIR"
+    nohup "$@" >> "$RUN/$name.log" 2>&1 < /dev/null &
+    echo $! > "$RUN/$name.pid"
     echo "$name started (pid $(cat "$RUN/$name.pid"))"
 }
 
@@ -49,7 +51,7 @@ case "${1:-status}" in
         start_one api "$PY" -m wastewise.api --host "$HOST" --port "$API_PORT"
         ;;
     stop) stop_one app; stop_one api ;;
-    restart) stop_one app; stop_one api; sleep 2; "$0" start ;;
+    restart) stop_one app; stop_one api; sleep 2; bash "$0" start ;;
     status) status ;;
     *) echo "usage: $0 start|stop|restart|status"; exit 2 ;;
 esac
