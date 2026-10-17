@@ -132,10 +132,14 @@ class Problem:
 
     # --------------------------------------------------------------- evaluation
     def route_cost(self, k: int, seq: list[int]) -> float:
+        """Cost of one route. The hot loop of the search: the fill and overflow lookups of load_at() and
+        overflow_at() are written out here (same arithmetic, about twice as fast)."""
         v = self.vehicles[k]
         p = self.params
         T, D = self.Tl, self.Dl
         LF, DEP = self.landfill, self.depot
+        MU, OV, CAPL, STOP, W = self._mu, self._over, self.bin_capacity_l, self.bin_stop, self.weight
+        t0, step, K, maxf = self._t0, self._step, self._K, p.max_fill_pct
         cap = v.capacity_l * p.usable_capacity
         t = v.start_ts
         load = v.start_load
@@ -145,6 +149,85 @@ class Problem:
         over = 0.0
         beat = 0
         for b in seq:
+            sb = STOP[b]
+            ta = t + T[pos][sb]
+            kk = (ta - t0) / step
+            row = MU[b]
+            if kk <= 0:
+                f = row[0]
+            elif kk >= K:
+                f = row[K]
+            else:
+                k0 = int(kk)
+                f = row[k0] + (row[k0 + 1] - row[k0]) * (kk - k0)
+            if f < 0.0:
+                f = 0.0
+            elif f > maxf:
+                f = maxf
+            lb = CAPL[b] * f / 100.0
+            if load + lb > cap and load > 0:
+                drive += T[pos][LF]
+                dist += D[pos][LF]
+                t += T[pos][LF] + self.unload_s
+                load = 0.0
+                pos = LF
+                ta = t + T[LF][sb]
+                kk = (ta - t0) / step
+                if kk <= 0:
+                    f = row[0]
+                elif kk >= K:
+                    f = row[K]
+                else:
+                    k0 = int(kk)
+                    f = row[k0] + (row[k0 + 1] - row[k0]) * (kk - k0)
+                if f < 0.0:
+                    f = 0.0
+                elif f > maxf:
+                    f = maxf
+                lb = CAPL[b] * f / 100.0
+            drive += T[pos][sb]
+            dist += D[pos][sb]
+            row = OV[b]
+            if kk <= 0:
+                o = row[0]
+            elif kk >= K:
+                o = row[K]
+            else:
+                k0 = int(kk)
+                o = row[k0] + (row[k0 + 1] - row[k0]) * (kk - k0)
+            over += W[b] * o
+            o = self.owner[b]
+            if o >= 0 and o != k:
+                beat += 1
+            t = ta + self.service_s[b]
+            load += lb
+            pos = sb
+        if load > 0:
+            drive += T[pos][LF]
+            dist += D[pos][LF]
+            t += T[pos][LF] + self.unload_s
+            pos = LF
+        if pos != DEP:
+            drive += T[pos][DEP]
+            dist += D[pos][DEP]
+            t += T[pos][DEP]
+        cost = p.drive_min * drive / 60.0 + p.per_km * dist / 1000.0 + p.overflow * over + p.beat_penalty * beat
+        late = t - v.end_ts
+        if late > 0:
+            cost += p.overtime_fixed + p.overtime_per_min * late / 60.0
+        return cost
+
+    def route_cost_reference(self, k: int, seq: list[int]) -> float:
+        """route_cost written with the lookup helpers (kept for the equivalence test)."""
+        v = self.vehicles[k]
+        p = self.params
+        T, D = self.Tl, self.Dl
+        LF, DEP = self.landfill, self.depot
+        cap = v.capacity_l * p.usable_capacity
+        t, load, pos = v.start_ts, v.start_load, v.start_pos
+        drive = dist = over = 0.0
+        beat = 0
+        for b in seq:
             sb = self.bin_stop[b]
             ta = t + T[pos][sb]
             lb = self.load_at(b, ta)
@@ -152,8 +235,7 @@ class Problem:
                 drive += T[pos][LF]
                 dist += D[pos][LF]
                 t += T[pos][LF] + self.unload_s
-                load = 0.0
-                pos = LF
+                load, pos = 0.0, LF
                 ta = t + T[LF][sb]
                 lb = self.load_at(b, ta)
             drive += T[pos][sb]
@@ -515,9 +597,11 @@ class SolveStats:
 
 
 def solve(prob: Problem, seconds: float = 8.0, max_iter: int = 5000, seed: int = 1,
-          start: Solution | None = None, patience: int | None = None) -> tuple[Solution, SolveStats]:
+          start: Solution | None = None, patience: int | None = None,
+          progress=None) -> tuple[Solution, SolveStats]:
     """patience: stop early once this many iterations in a row found no better plan
-    (seconds is then only a safety cap)."""
+    (seconds is then only a safety cap). progress(iterations, best_solution) is called about twice
+    a second so a user interface can show how the search is going."""
     rng = random.Random(seed)
     t_start = time.perf_counter()
     deadline = t_start + seconds
@@ -538,6 +622,7 @@ def solve(prob: Problem, seconds: float = 8.0, max_iter: int = 5000, seed: int =
     q_max = max(2, min(15, int(0.35 * prob.nb)))
     it = 0
     last_better = 0
+    next_report = t_start
     ls_budget = 0.15 * seconds if patience is None else min(3.0, 0.15 * seconds)
     while it < max_iter and time.perf_counter() < deadline - ls_budget:
         if patience is not None and it - last_better > patience and it >= 2 * patience:
@@ -571,6 +656,9 @@ def solve(prob: Problem, seconds: float = 8.0, max_iter: int = 5000, seed: int =
         sr[ri] += score
         nd[di] += 1
         nr[ri] += 1
+        if progress is not None and time.perf_counter() >= next_report:
+            next_report = time.perf_counter() + 0.5
+            progress(it, best)
         if it % 50 == 0:
             for w, s, n in ((wd, sd, nd), (wr, sr, nr)):
                 for i in range(len(w)):

@@ -85,4 +85,4 @@ def tab(day) -> None:
                     progress.record_crew(c, plans[r["plan_id"]], r["vehicle_id"], outcome, user()["username"], bid,
                                          float(fill), ts=ts, note="entered from paper route sheet")
                     mark_seen()
-                    st.success(f"Saved {bid}: {STATUS_LABEL[outcome]}.")
+                    st.success(f"Saved {r['landmark']}: {STATUS_LABEL[outcome]}.")

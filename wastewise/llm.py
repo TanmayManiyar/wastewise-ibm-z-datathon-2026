@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime
 from urllib.parse import urlparse
 
-from . import config, db
+from . import config, db, fmt
 
 DEFAULT_URL = "http://127.0.0.1:8080"
 LANG_NAMES = {"en": "English", "hi": "Hindi (Devanagari script)", "mr": "Marathi (Devanagari script)"}
@@ -75,7 +75,7 @@ def chat(conn: sqlite3.Connection, system: str, user: str, max_tokens: int = 350
 
 # ------------------------------------------------------------------ facts and checking
 def _hm(ts) -> str:
-    return datetime.fromtimestamp(ts, config.IST).strftime("%H:%M")
+    return fmt.hhmm(ts)
 
 
 def plan_facts(plan: dict) -> dict:
@@ -87,14 +87,14 @@ def plan_facts(plan: dict) -> dict:
         urgent = sorted((s for s in bins if s["status"] in ("red", "orange")), key=lambda s: s["arrive_ts"])
         routes.append({"truck": r["vehicle_name"], "vehicle_id": r["vehicle_id"], "bins": len(bins),
                        "start": _hm(r["start_ts"]), "back_by": _hm(r["totals"]["end_ts"]),
-                       "landfill_trips": r["totals"]["landfill_trips"], "km": r["totals"]["distance_km"],
+                       "landfill_trips": r["totals"]["landfill_trips"], "km": round(r["totals"]["distance_km"]),
                        "first_stop": bins[0]["landmark"],
                        "first_stop_time": _hm(bins[0]["arrive_ts"]),
                        "urgent_stops": [f"{s['landmark']} at {_hm(s['arrive_ts'])}" for s in urgent[:3]]})
     k = plan["kpis"]
     return {"date": plan["plan_date"], "plan_id": plan.get("id"), "status": plan.get("status", "draft"),
             "trucks": len(routes), "bins_total": k["bins_served"], "due_left_out": k["due_left_out"],
-            "distance_km": k["distance_km"], "landfill_trips": k["landfill_trips"],
+            "distance_km": round(k["distance_km"]), "landfill_trips": k["landfill_trips"],
             "last_truck_back": _hm(k["finish_ts"]), "routes": routes,
             "alerts": [a["text"] for a in plan.get("alerts", []) if a["level"] in ("critical", "warning")][:4]}
 
@@ -161,9 +161,9 @@ def evening_facts(conn, main_plan: dict) -> dict | None:
 
 
 def template_briefing(f: dict) -> str:
-    nice = datetime.strptime(f["date"], "%Y-%m-%d").strftime("%A %d %B %Y")
+    nice = fmt.day_name(f["date"])
     lines = [f"Morning briefing for {nice}: {f['trucks']} trucks will collect {f['bins_total']} bins "
-             f"({f['distance_km']} km, {f['landfill_trips']} landfill trips). The last truck should be back by "
+             f"({fmt.km(f['distance_km'])}, {f['landfill_trips']} landfill trips). The last truck should be back by "
              f"{f['last_truck_back']}."]
     for r in f["routes"]:
         s = (f"{r['truck']}: {r['bins']} bins from {r['start']}, first stop {r['first_stop']} at "

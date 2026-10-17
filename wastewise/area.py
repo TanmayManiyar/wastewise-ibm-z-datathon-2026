@@ -34,6 +34,7 @@ class SiteType:
     capacity_l: int
     priority: int          # 1 = highest
     every_days: int
+    rest_days: str = ""    # weekdays without collection, 0 = Monday ... 6 = Sunday ("6" = not on Sundays)
 
 
 SITE_TYPES = [
@@ -43,12 +44,12 @@ SITE_TYPES = [
     SiteType("bus_stand", "Bus stand", 2, 1100, 1, 1),
     SiteType("supermarket", "Supermarket", 1, 2400, 1, 1),
     SiteType("gaothan", "Village core (gaothan)", 2, 2400, 1, 1),
-    SiteType("school", "School", 8, 660, 1, 1),
+    SiteType("school", "School", 8, 660, 1, 1, "6"),          # closed on Sundays: no collection
     SiteType("college", "College", 2, 1100, 2, 1),
     SiteType("temple", "Temple", 2, 660, 2, 1),
     SiteType("worship", "Church / gurudwara", 2, 660, 2, 1),
     SiteType("eatery", "Eateries", 2, 1100, 2, 1),
-    SiteType("public_office", "Public office", 1, 660, 2, 1),
+    SiteType("public_office", "Public office", 1, 660, 2, 2),
     SiteType("housing", "Housing society", 10, 1100, 2, 1),
     SiteType("park", "Park", 6, 660, 3, 2),
     SiteType("ground", "Playground", 5, 660, 3, 2),
@@ -222,6 +223,7 @@ def select_bins(cands: list[dict], min_spacing_m: float = 50.0) -> list[dict]:
         b["capacity_l"] = st.capacity_l
         b["priority"] = st.priority
         b["collect_every_days"] = st.every_days
+        b["rest_days"] = st.rest_days
         # Sensors on all priority-1 sites and on large bins; manual readings elsewhere.
         b["has_sensor"] = int(st.priority == 1 or st.capacity_l >= 1100)
     return chosen
@@ -253,10 +255,10 @@ def setup(conn: sqlite3.Connection, replace: bool = False) -> dict:
         for b in bins:
             conn.execute(
                 "INSERT OR IGNORE INTO bins(id, landmark, street, site_type, lat, lon, capacity_l, priority,"
-                " has_sensor, active, collect_every_days, osm_ref, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?)",
+                " has_sensor, active, collect_every_days, rest_days, osm_ref, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?)",
                 (b["id"], b["landmark"], b["street"], b["site_type"], b["lat"], b["lon"], b["capacity_l"],
-                 b["priority"], b["has_sensor"], b["collect_every_days"], b["osm_ref"], t))
+                 b["priority"], b["has_sensor"], b["collect_every_days"], b["rest_days"], b["osm_ref"], t))
         for vid, name, cap, color in FLEET:
             conn.execute("INSERT OR IGNORE INTO vehicles(id, name, capacity_l, shift_start, shift_hours, color, active)"
                          " VALUES (?,?,?,?,?,?,1)", (vid, name, cap, "06:00", 4.0, color))

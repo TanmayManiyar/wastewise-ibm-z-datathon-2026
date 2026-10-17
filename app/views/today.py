@@ -5,7 +5,7 @@ import streamlit as st
 
 from datetime import datetime
 
-from wastewise import config, db, evening, pdfs, planner, roads
+from wastewise import config, db, evening, fmt, jobs, pdfs, planner, roads
 
 from ui import maps
 from ui.tables import Col, table
@@ -32,18 +32,55 @@ def _plan_choices(day) -> list[dict]:
     return rows
 
 
-def _generate(kind: str, base: dict | None = None) -> None:
-    u = user()
-    c = conn()
-    try:
-        with st.spinner("Planning routes on the real street network ... (about 10 seconds)"):
-            p = planner.generate(c, u["username"], kind=kind, replan_of=base)
-        pid = planner.save(c, p, u["username"])
-        st.session_state.plan_view = pid
-        mark_seen()
-        st.toast("New plan ready (draft). Check it, then approve.", icon=":material/check_circle:")
-    except planner.PlanError as exc:
-        st.error(str(exc))
+def _main_key(day) -> str:
+    return f"main:{day if isinstance(day, str) else day.isoformat()}"
+
+
+def _extra_key(day) -> str:
+    return f"extra:{day if isinstance(day, str) else day.isoformat()}"
+
+
+def _generate(kind: str, day, base: dict | None = None) -> None:
+    """Start making the plan in the background; job_panel() shows the progress."""
+    name = user()["username"]
+    key = _main_key(day)
+    jobs.start(key, "re-plan" if kind == "replan" else "plan", name,
+               lambda c, progress: planner.generate(c, name, kind=kind, replan_of=base, progress=progress))
+    st.session_state[f"_watch_{key}"] = True
+
+
+def job_panel(key: str) -> None:
+    """Live progress of a plan being made in the background. The rest of the page stays usable."""
+    j = jobs.get(key)
+    watching = st.session_state.get(f"_watch_{key}")
+    if j is None or (j.status != "running" and not watching):
+        return
+
+    @st.fragment(run_every=1)
+    def _panel():
+        j = jobs.get(key)
+        if j.status == "running":
+            with st.container(border=True):
+                st.markdown(f"**Making the {j.label}** (started by {j.user} at {hhmm(j.started)}). You can keep "
+                            "working on the other tabs - the plan appears here when it is ready.")
+                text = jobs.PHASE_TEXT.get(j.phase, j.phase)
+                if j.phase in ("search", "check") and j.iterations:
+                    text += f" · {j.iterations:,} route variations tried"
+                    if j.best_km is not None:
+                        text += f" · best so far {fmt.km(j.best_km)}"
+                st.progress(j.fraction(), text=text + f" · {duration(j.elapsed / 60) if j.elapsed >= 60 else f'{j.elapsed:.0f} s'}")
+            return
+        if st.session_state.pop(f"_watch_{key}", None):
+            if j.status == "done":
+                if key.startswith("main:"):
+                    st.session_state.plan_view = j.plan_id
+                st.session_state["_plan_toast"] = f"The {j.label} is ready (draft). Check it, then approve."
+            else:
+                st.session_state["_plan_error"] = j.error
+            mark_seen()
+            st.rerun(scope="app")
+
+    _panel()
 
 
 def route_pdf(p: dict, routes: list[dict]) -> bytes:
@@ -64,8 +101,14 @@ def summary_card(p: dict) -> None:
            f"**{hhmm(k['finish_ts'])}**. ")
     msg += (f"**{left} due bin(s) do not fit - an extra trip is needed.** " if left else "All due bins fit. ")
     msg += (f"{attention} thing(s) need your attention below." if attention else "Nothing needs your attention.")
+    extra = [s for r in p["routes"] for s in r["stops"] if s["kind"] == "bin" and not s.get("due", True)]
     with st.container(border=True):
         st.markdown(msg)
+        if extra:
+            st.markdown(f"➕ **{len(extra)} of these bins are not due today** (collected every 2 days, or not on "
+                        "Sundays) but will be nearly full by the next round, so WasteWise added them: "
+                        + ", ".join(f"{s['landmark']} ({fmt.fill(s['expected_fill_pct'])})" for s in extra[:4])
+                        + (f" and {len(extra) - 4} more" if len(extra) > 4 else "") + ".")
 
 
 def kpi_row(p: dict) -> None:
@@ -73,9 +116,9 @@ def kpi_row(p: dict) -> None:
     over_h, base_h = k["expected_overflow_min"] / 60, b["expected_overflow_min"] / 60
     cols = st.columns(4)
     cols[0].metric("Waste to collect", litres(k["litres"]), f"{k['landfill_trips']} landfill trips", delta_color="off")
-    cols[1].metric("Driving", f"{k['distance_km']:.0f} km", change(k["distance_km"], b["distance_km"], "km"),
+    cols[1].metric("Driving", fmt.km(k["distance_km"]), change(k["distance_km"], b["distance_km"], "km"),
                    delta_color="inverse")
-    cols[2].metric("Diesel / CO₂", f"{k['fuel_l']:.0f} L · {k['co2_kg']:.0f} kg CO₂",
+    cols[2].metric("Diesel / CO₂", f"{litres(k['fuel_l'])} · {k['co2_kg']:,.0f} kg CO₂",
                    change(k["co2_kg"], b["co2_kg"], "kg CO₂"), delta_color="inverse")
     cols[3].metric("Time bins spend overflowing", f"about {duration(k['expected_overflow_min'])}",
                    (f"{duration(abs(k['expected_overflow_min'] - b['expected_overflow_min']))} "
@@ -85,11 +128,33 @@ def kpi_row(p: dict) -> None:
                + (" (demonstration data)." if p.get("label") else "."))
 
 
-def show_alerts(alerts: list[dict]) -> None:
-    """All alerts in one 'Needs attention' box: the three most important first, the rest folded."""
-    important = [a for a in alerts if a["level"] in ("critical", "warning")]
-    info = [a for a in alerts if a["level"] not in ("critical", "warning")]
+def handled_since(p: dict) -> dict[str, str]:
+    """Bins the crews have dealt with since the plan was made (collected, missing, could not reach)."""
+    words = {"collected": "collected", "bin_missing": "reported missing", "could_not_reach": "could not be reached"}
+    out = {}
+    for r in conn().execute("SELECT bin_id, kind FROM events WHERE ts>=? AND bin_id IS NOT NULL AND kind IN"
+                            " ('collected','bin_missing','could_not_reach') ORDER BY ts", (p["created_at"],)):
+        out[r[0]] = words[r[1]]
+    return out
+
+
+def show_alerts(alerts: list[dict], made_at: int | None = None, handled: dict[str, str] | None = None) -> None:
+    """What the plan expected when it was made, minus what the crews have handled since. What is happening
+    now is the Live alerts tab (the single 'now' list)."""
+    handled = handled or {}
     names = {b["id"]: b["landmark"] for b in db.bins(conn(), active_only=False)}
+    kept, done = [], 0
+    for a in alerts:
+        if a.get("bins"):
+            left = [b for b in a["bins"] if b not in handled]
+            if not left:
+                done += 1
+                continue
+            if len(left) < len(a["bins"]):
+                a = dict(a, bins=left, handled_n=len(a["bins"]) - len(left))
+        kept.append(a)
+    important = [a for a in kept if a["level"] in ("critical", "warning")]
+    info = [a for a in kept if a["level"] not in ("critical", "warning")]
 
     def line(a):
         icon = "🔴" if a["level"] == "critical" else "🟠" if a["level"] == "warning" else "ℹ️"
@@ -97,30 +162,36 @@ def show_alerts(alerts: list[dict]) -> None:
         if a.get("bins"):
             ps = [names.get(b, b) for b in a["bins"][:4]]
             places = " · " + ", ".join(ps) + (f" and {len(a['bins']) - 4} more" if len(a["bins"]) > 4 else "")
+        if a.get("handled_n"):
+            places += f" ({a['handled_n']} more already handled by the crews)"
         return f"{icon} **{a['text']}**{places}  \n&nbsp;&nbsp;&nbsp;&nbsp;→ {a['action']}"
 
-    if not important:
-        st.success("Nothing needs your attention.", icon=":material/check_circle:")
-    else:
-        with st.container(border=True):
-            st.markdown("##### Needs attention")
-            for a in important[:3]:
-                st.markdown(line(a))
-            if len(important) > 3:
-                with st.expander(f"{len(important) - 3} more"):
-                    for a in important[3:]:
-                        st.markdown(line(a))
-    if info:
-        with st.expander("For information"):
-            for a in info:
-                st.markdown(line(a))
+    with st.container(border=True):
+        h, b = st.columns([2.4, 1])
+        h.markdown("##### When the plan was made" + (f" ({hhmm(made_at)})" if made_at else ""))
+        b.button("Live alerts: what is happening now", key="to_live", on_click=_open_live_alerts,
+                 icon=":material/notifications_active:", use_container_width=True)
+        st.caption("What WasteWise expected when it made this plan. Items the crews have handled since are left out"
+                   + (f" ({done} so far)" if done else "") + ". New complaints, sensor problems and crew reports "
+                   "appear under **Live alerts**.")
+        if not important:
+            st.markdown("✅ Nothing needed attention.")
+        for a in important[:3]:
+            st.markdown(line(a))
+        if len(important) > 3:
+            with st.expander(f"{len(important) - 3} more"):
+                for a in important[3:]:
+                    st.markdown(line(a))
+        if info:
+            with st.expander("For information"):
+                for a in info:
+                    st.markdown(line(a))
 
 
 ROUTE_COLS = [Col("n", "Stop"), Col("time", "Time"), Col("place", "Place"), Col("street", "Street"),
               Col("fill", "How full when the truck arrives", "bar"), Col("status", "Status", "pill"),
-              Col("map", "", "map")]
-STATUS_PILL = {"red": ("Already full", "red"), "orange": ("Full by arrival", "orange"),
-               "amber": ("Over half", "amber"), "green": ("Fine", "green")}
+              Col("why", "Why today"), Col("map", "", "map")]
+STATUS_PILL = {k: (v, k) for k, v in fmt.PLAN_PILL.items()}
 
 
 def route_rows(route: dict) -> list[dict]:
@@ -130,7 +201,8 @@ def route_rows(route: dict) -> list[dict]:
         if s["kind"] == "bin":
             n += 1
             rows.append({"n": str(n), "time": hhmm(s["arrive_ts"]), "place": s["landmark"], "street": s["street"],
-                         "fill": s["expected_fill_pct"], "status": STATUS_PILL[s["status"]],
+                         "fill": (s["expected_fill_pct"], s["status"]), "status": STATUS_PILL[s["status"]],
+                         "why": "due today" if s.get("due", True) else "not due, but nearly full",
                          "map": (s["lat"], s["lon"]), "kind": "bin"})
         elif s["kind"] == "landfill":
             rows.append({"n": "🚛", "time": hhmm(s["arrive_ts"]), "place": "Turbhe landfill - unload",
@@ -141,7 +213,43 @@ def route_rows(route: dict) -> list[dict]:
                          "fill": None, "status": None, "map": None, "kind": "depot"})
     return rows
 
+def time_hint(day) -> dict:
+    """Which actions are possible right now, in one sentence at the top of the plan, and why the other
+    buttons are switched off."""
+    c = conn()
+    s = db.get_settings(c)
+    now = db.now()
+    start, end = planner.shift_window(s, day)
+    _, t_end = planner.shift_window(s, planner.today(now))
+    if now < start:
+        phase = "before"
+        text = (f"🕔 **Before the shift.** The shift on {fmt.day_name(day)} starts at **{hhmm(start)}**. Now you can "
+                "generate the plan, check it, approve it, then print route sheets and send the crew messages. "
+                f"Re-planning opens at {hhmm(start)}, when the trucks leave.")
+    elif now < end:
+        phase = "during"
+        text = (f"🚛 **Shift under way** ({hhmm(start)} to {hhmm(end)}). Now you can follow **Progress** and "
+                "**Live alerts**, and use **Re-plan from now** if something changes - it starts each truck from "
+                f"where it is. A plan for the next day can be made after {hhmm(end)}.")
+    if now >= end or day > planner.today(now):
+        phase = "after"
+        text = (f"🌙 **Today's shift is over** (ended {hhmm(t_end)}). Now you can plan the next shift, "
+                f"**{fmt.day_name(day)} at {hhmm(start)}**, and plan an evening round for today (below) if bins "
+                "will overflow before then.")
+    st.info(text)
+    return {"phase": phase, "start": start, "end": end}
+
+
 def plan_tab(day) -> None:
+    hint = time_hint(day)
+    _plan_body(day, hint)
+    today_ = planner.today()
+    main = planner.current(conn(), today_)
+    if main and main["kind"] in ("daily", "replan"):
+        evening_section(main, today=True)
+
+
+def _plan_body(day, hint: dict) -> None:
     c = conn()
     settings = db.get_settings(c)
     shift_now = planner.in_shift(c)
@@ -161,22 +269,46 @@ def plan_tab(day) -> None:
         st.session_state.plan_view = view_id
     p = planner.get(c, view_id) if view_id else None
 
-    b1, b2, b3, _ = st.columns([1.2, 1, 1.3, 3])
+    busy = jobs.running(_main_key(day))
+    if st.session_state.get("_plan_toast"):
+        st.toast(st.session_state.pop("_plan_toast"), icon=":material/check_circle:")
+    if st.session_state.get("_plan_error"):
+        st.error(st.session_state.pop("_plan_error"))
+    # why each switched-off button is off, in plain words (shown as tooltip and below the buttons)
+    why_gen = ("A plan is being made right now." if busy else
+               f"Not during the shift (until {hhmm(hint['end'])}) - use Re-plan from now." if shift_now else None)
+    why_approve = None if not p or p["verifier"]["ok"] else "This plan failed the independent check."
+    why_replan = ("A plan is being made right now." if busy else
+                  f"Opens when the shift starts at {hhmm(hint['start'])}." if hint["phase"] == "before" else
+                  "The shift is over." if hint["phase"] == "after" else
+                  "Needs an approved plan for today." if not approved else None)
+    bar_ = st.container(horizontal=True)       # buttons keep their natural width (no cut-off labels)
+    b1 = b2 = b3 = bar_
+    off = []
     if can("generate_plan"):
-        if b1.button("Generate plan", type="primary" if p is None else "secondary", disabled=shift_now,
-                     help="Plan the next shift from the latest data. During the shift use Re-plan from now."):
-            _generate("daily")
+        if b1.button("Generate plan", type="primary" if p is None else "secondary", disabled=bool(why_gen),
+                     help=why_gen or "Plan the next shift from the latest data."):
+            _generate("daily", day)
             st.rerun()
+        if why_gen and not busy:
+            off.append(f"**Generate plan** is off: {why_gen}")
     if p and can("approve_plan") and p["status"] == "draft":
-        if b2.button("Approve plan", type="primary", disabled=not p["verifier"]["ok"]):
+        if b2.button("Approve plan", type="primary", disabled=bool(why_approve), help=why_approve):
             planner.approve(c, p["id"], user()["username"])
             mark_seen()
             st.rerun()
+        if why_approve:
+            off.append(f"**Approve plan** is off: {why_approve}")
     if can("replan"):
-        if b3.button("Re-plan from now", disabled=not (shift_now and approved),
-                     help="Only during shift hours, starting each truck from where it is now."):
-            _generate("replan", approved)
+        if b3.button("Re-plan from now", disabled=bool(why_replan),
+                     help=why_replan or "Starts each truck from where it is now, with what it carries."):
+            _generate("replan", day, approved)
             st.rerun()
+        if why_replan and not busy:
+            off.append(f"**Re-plan from now** is off: {why_replan}")
+    if off:
+        st.caption(" · ".join(off))
+    job_panel(_main_key(day))
 
     if p is None:
         st.info(f"No plan yet for **{today_label(day)}**. Nothing is computed until someone presses "
@@ -200,7 +332,7 @@ def plan_tab(day) -> None:
         st.error("This plan failed the independent check and cannot be approved: "
                  + "; ".join(p["verifier"]["errors"][:3]))
     summary_card(p)
-    show_alerts(p["alerts"])
+    show_alerts(p["alerts"], p["created_at"], handled_since(p))
     kpi_row(p)
 
     st.markdown("##### Routes on the map")
@@ -212,8 +344,7 @@ def plan_tab(day) -> None:
     fig = maps.plan_map(p, db.places(c), db.bins(c), net, sel, tiles=settings.get("map_tiles", "osm"))
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
     st.caption("Each truck has its own colour (line and ring). The dot in the middle shows how full the bin will "
-               "be: 🔴 already full · 🟠 full by the time the truck arrives · 🟡 over half · 🟢 fine. "
-               "Numbers = stop order. Grey = not in today's plan.")
+               f"be: {fmt.legend(fmt.PLAN_WORDS)}. Numbers = stop order. Grey = not in today's plan.")
 
     hdr, btn = st.columns([3, 1])
     hdr.markdown("##### Each truck's route")
@@ -228,7 +359,7 @@ def plan_tab(day) -> None:
         stops = route_rows(r)
         full = sum(1 for x in stops if x["kind"] == "bin" and x["status"][1] in ("red", "orange"))
         title = (f"**{r['vehicle_name']}** · {t['bins']} stops · {t['landfill_trips']} landfill trip(s) · "
-                 f"{t['distance_km']:.0f} km · {hhmm(r['start_ts'])} to {hhmm(t['end_ts'])}")
+                 f"{fmt.km(t['distance_km'])} · {hhmm(r['start_ts'])} to {hhmm(t['end_ts'])}")
         with st.expander(title, expanded=False):
             st.markdown(f"{full} bin(s) on this route will be full when the truck arrives."
                         + (f" This truck also helps another area at {t['off_beat_bins']} stop(s)."
@@ -245,6 +376,7 @@ def plan_tab(day) -> None:
             bins = {b["id"]: b for b in db.bins(c, active_only=False)}
             table([{"place": u["landmark"], "street": bins.get(u["bin_id"], {}).get("street", ""),
                     "why": ("Due, but no truck has space or time - send an extra trip" if u["due"]
+                            else "Not collected on this weekday, and not full enough" if u.get("rest_day")
                             else "Not due and not full enough today"),
                     "map": (bins[u["bin_id"]]["lat"], bins[u["bin_id"]]["lon"]) if u["bin_id"] in bins else None}
                    for u in p["unserved"]],
@@ -267,8 +399,6 @@ def plan_tab(day) -> None:
             bn = {b["id"]: b["landmark"] for b in db.bins(c, active_only=False)}
             st.markdown("- **Sensors not trusted today** (faulty or offline - their manual readings are used): "
                         + ", ".join(bn.get(x, x) for x in p["bad_sensors"]))
-    if p["kind"] in ("daily", "replan"):
-        evening_section(p)
 
 
 # ------------------------------------------------------------------ evening round
@@ -278,10 +408,12 @@ def _assess(plan_id: int, version: int) -> dict:
     return evening.assess(c, planner.get(c, plan_id))
 
 
-def evening_section(main: dict) -> None:
+def evening_section(main: dict, today: bool = False) -> None:
     c = conn()
     st.divider()
-    st.markdown("### Evening round")
+    st.markdown(f"### Evening round {'today' if today else ''} · {fmt.day_name(main['plan_date'])}")
+    job_panel(_extra_key(main["plan_date"]))
+    ev_busy = bool(jobs.running(_extra_key(main["plan_date"])))
     ev = planner.current(c, main["plan_date"], round_="extra")
     a = _assess(main["id"], db.data_version(c))
     by_id = {b["id"]: b for b in db.bins(c)}
@@ -305,7 +437,7 @@ def evening_section(main: dict) -> None:
                       [Col("place", "Place"), Col("street", "Street"), Col("full", "Full again at"),
                        Col("over", "Overflowing before tomorrow's round"), Col("map", "", "map")])
                 if can("generate_plan") and st.button("Plan the evening round at the best time", type="primary",
-                                                      key="ev_suggested"):
+                                                      key="ev_suggested", disabled=ev_busy):
                     _make_evening(main, a["suggested_start_ts"], a["suggested_end_ts"],
                                   [x["bin_id"] for x in a["candidates"]], a)
         else:
@@ -325,7 +457,7 @@ def evening_section(main: dict) -> None:
                                         default=[x["bin_id"] for x in a["candidates"] if x["bin_id"] in by_id],
                                         format_func=lambda x: f"{by_id[x]['landmark']} - {by_id[x]['street'] or ''}",
                                         key="ev_bins")
-                if st.button("Plan this round", key="ev_manual", disabled=not chosen):
+                if st.button("Plan this round", key="ev_manual", disabled=not chosen or ev_busy):
                     start = int(datetime.combine(day, t, tzinfo=config.IST).timestamp())
                     _make_evening(main, start, int(start + hours * 3600), chosen, a)
         return
@@ -366,15 +498,12 @@ def evening_section(main: dict) -> None:
 
 
 def _make_evening(main: dict, start: int, end: int, bins: list[str], a: dict) -> None:
-    c = conn()
-    try:
-        with st.spinner("Planning the evening round ..."):
-            p = evening.plan_round(c, user()["username"], main, start, end, bins, assessment=a)
-        planner.save(c, p, user()["username"])
-        mark_seen()
-        st.rerun()
-    except planner.PlanError as exc:
-        st.error(str(exc))
+    name = user()["username"]
+    key = _extra_key(main["plan_date"])
+    jobs.start(key, "evening round", name,
+               lambda c, progress: evening.plan_round(c, name, main, start, end, bins, assessment=a, progress=progress))
+    st.session_state[f"_watch_{key}"] = True
+    st.rerun()
 
 
 
@@ -384,15 +513,23 @@ def page() -> None:
     day = planner.plan_day(c)
     st.title("Today's plan")
     synthetic_notice()
-    tabs = st.tabs(["Plan", "Progress", "Live alerts", "Morning briefing & crew messages", "Crew phone view"])
+    now_day = planner.today()
+    tabs = st.tabs(TABS, key="today_tab", on_change="rerun")
     with tabs[0]:
         plan_tab(day)
     from views import progress, alerts_view, briefing, crew
     with tabs[1]:
-        progress.tab(day)
+        progress.tab(now_day)
     with tabs[2]:
-        alerts_view.tab(day)
+        alerts_view.tab(now_day)
     with tabs[3]:
         briefing.tab(day)
     with tabs[4]:
-        crew.preview(day)
+        crew.preview(now_day)
+
+
+TABS = ["Plan", "Progress", "Live alerts", "Morning briefing & crew messages", "Crew phone view"]
+
+
+def _open_live_alerts() -> None:
+    st.session_state["today_tab"] = "Live alerts"

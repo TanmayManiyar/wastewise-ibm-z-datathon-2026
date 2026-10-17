@@ -5,7 +5,7 @@ import urllib.parse
 
 import streamlit as st
 
-from wastewise import db, planner, progress
+from wastewise import db, fmt, planner, progress
 
 from ui.common import can, conn, hhmm, live_refresh, mark_seen, user
 from ui.i18n import LANGS, t
@@ -43,6 +43,9 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
     if not route:
         st.info(t("no_route", lang))
         return
+    if plan["plan_date"] != planner.today().isoformat():
+        st.info(f"{fmt.day_name(plan['plan_date'])} · {t('planned', lang)} {hhmm(plan['start_ts'])}",
+                icon=":material/event:")
     if plan.get("kind") == "extra":
         st.info(f"🌆 {t('evening', lang)} · {hhmm(plan['start_ts'])}", icon=":material/nights_stay:")
     seen = st.session_state.get(f"{key}_plan_seen")
@@ -59,8 +62,8 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
     done_bins = sum(1 for s, st_ in zip(route["stops"], states) if s["kind"] == "bin" and st_ == "done")
     nxt = next((i for i, (s, st_) in enumerate(zip(route["stops"], states)) if st_ == "todo" and s["kind"] != "depot"),
                None)
-    st.progress(done_bins / max(nbins, 1), text=f"{done_bins} / {nbins} · {t('load', lang)} ≈ {load:,.0f} L "
-                                                  f"/ {cap:,.0f} L")
+    st.progress(done_bins / max(nbins, 1), text=f"{done_bins} / {nbins} · {t('load', lang)} ≈ {fmt.litres(load)} "
+                                                  f"/ {fmt.litres(cap)}")
     if nxt is None:
         st.success(t("depot", lang), icon=":material/home:")
         return
@@ -130,7 +133,7 @@ def page() -> None:
     live_refresh(10)
     u = user()
     c = conn()
-    day = planner.plan_day(c).isoformat()
+    day = progress.crew_day(c, u["vehicle_id"])
     v = next((x for x in db.vehicles(c, active_only=False) if x["id"] == u["vehicle_id"]), None)
     render(u["vehicle_id"], day, interactive=True, key="crew", title=v["name"] if v else u["vehicle_id"])
 
@@ -146,4 +149,4 @@ def preview(day) -> None:
     left, _ = st.columns([1, 1.4])
     with left.container(border=True):
         # only roles that may record progress get working buttons (viewers just look)
-        render(vid, day.isoformat(), interactive=can("record_progress"), key=f"pv_{vid}")
+        render(vid, progress.crew_day(c, vid), interactive=can("record_progress"), key=f"pv_{vid}")

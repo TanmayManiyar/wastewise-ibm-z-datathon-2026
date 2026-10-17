@@ -62,14 +62,8 @@ class RiskCurves:
     def status_at(self, i: int, ts: float) -> str:
         """Colour class for the map: red = full at start, orange = full by arrival,
         amber = over half, green = fine."""
-        if self.mu[i, 0] >= 100:
-            return "red"
-        f = self.fill_at(i, ts)
-        if f >= 100:
-            return "orange"
-        if f >= 50:
-            return "amber"
-        return "green"
+        from .fmt import status_plan
+        return status_plan(float(self.mu[i, 0]), self.fill_at(i, ts))
 
 
 def build(bin_ids: list[str], mu0: np.ndarray, sd0: np.ndarray, rates: np.ndarray, start_ts: int,

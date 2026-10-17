@@ -14,11 +14,18 @@ import plotly.graph_objects as go
 
 from wastewise import osm, roads
 
+from wastewise import fmt
+
 from .common import STATUS_COLOURS, STATUS_WORDS, hhmm
 
 DEPOT_COLOUR = "#334155"
 LANDFILL_COLOUR = "#111827"
 NOT_PLANNED = "#94A3B8"
+
+
+def _fill_words(pct: float) -> str:
+    f = fmt.fill(pct)
+    return f if f == "overflowing" else f"about {f} full"
 
 
 def _street_lines(net: roads.Network, max_edges: int = 20000):
@@ -88,7 +95,7 @@ def plan_map(plan: dict, places: dict, bins: list[dict], net: roads.Network | No
         lon = [s["lon"] for s in stops]
         nums = [str(i) for i in range(1, len(stops) + 1)]
         hover = [f"<b>{s['landmark']}</b><br>{s['street']}<br>{r['vehicle_name']}, stop {n}, arrives "
-                 f"{hhmm(s['arrive_ts'])}<br>Expected {min(s['expected_fill_pct'], 120):.0f}% full · "
+                 f"{hhmm(s['arrive_ts'])}<br>{_fill_words(s['expected_fill_pct']).capitalize()} · "
                  f"{STATUS_WORDS[s['status']]}"
                  for n, s in zip(nums, stops)]
         fig.add_trace(go.Scattermap(lat=lat, lon=lon, mode="markers", marker=dict(size=24, color=r["color"]),
@@ -134,8 +141,8 @@ def bins_map(bins: list[dict], status: dict[str, str], fills: dict[str, float], 
         fig.add_trace(go.Scattermap(
             lat=[b["lat"] for b in sel], lon=[b["lon"] for b in sel], mode="markers",
             marker=dict(size=13, color=STATUS_COLOURS[st_name]),
-            hovertext=[f"<b>{b['landmark']}</b><br>{b['street']}<br>about {min(fills.get(b['id'], 0), 120):.0f}% full"
-                       for b in sel], hoverinfo="text", name=STATUS_WORDS[st_name].capitalize()))
+            hovertext=[f"<b>{b['landmark']}</b><br>{b['street']}<br>{_fill_words(fills.get(b['id'], 0))}"
+                       for b in sel], hoverinfo="text", name=fmt.NOW_WORDS[st_name].capitalize()))
     if highlight:
         b = next((x for x in bins if x["id"] == highlight), None)
         if b:

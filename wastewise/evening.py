@@ -113,7 +113,7 @@ def assess(conn: sqlite3.Connection, plan: dict, min_overflow_min: float = 60.0)
 
 
 def plan_round(conn: sqlite3.Connection, user: str, base: dict, start_ts: int, end_ts: int, bins: list[str],
-               now_ts: int | None = None, assessment: dict | None = None) -> dict:
+               now_ts: int | None = None, assessment: dict | None = None, progress=None) -> dict:
     """Build the evening (extra) plan for the given slot and bins."""
     if not bins:
         raise planner.PlanError("Choose at least one bin for the evening round")
@@ -121,7 +121,7 @@ def plan_round(conn: sqlite3.Connection, user: str, base: dict, start_ts: int, e
         stp["bin_id"]: stp["arrive_ts"] for r in base["routes"] for stp in r["stops"] if stp["kind"] == "bin"}
     p = planner.generate(conn, user, kind="extra", now_ts=now_ts,
                          extra={"plan_date": base["plan_date"], "start_ts": int(start_ts), "end_ts": int(end_ts),
-                                "bins": list(bins), "assume_collected": assume})
+                                "bins": list(bins), "assume_collected": assume}, progress=progress)
     p["evening"] = {"slot": [int(start_ts), int(end_ts)], "requested_bins": list(bins),
                     "suggested": bool(assessment and assessment.get("suggested_start_ts") == start_ts)}
     return p

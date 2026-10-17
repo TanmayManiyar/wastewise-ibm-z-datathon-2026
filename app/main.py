@@ -17,12 +17,16 @@ patch_plotly()   # IBM LinuxONE is big-endian: send chart data to the browser as
 st.set_page_config(page_title="WasteWise · Sanpada", page_icon=":material/recycling:", layout="wide",
                    initial_sidebar_state="auto")
 
-from ui.common import conn, css, header_badge, log, user  # noqa: E402
+from ui.common import conn, cookie_sync, css, header_badge, log, sign_out, user  # noqa: E402
 from views import bins, crew, help as help_view, login, reports, settings, today, whatif  # noqa: E402
 from wastewise import auth  # noqa: E402
 
+from wastewise import live  # noqa: E402
+
+live.demo_daemon()   # demonstration mode: keeps the synthetic history current and the live feed running
 css()
 u = user()
+cookie_sync()
 if not u:
     login.page()
     st.stop()
@@ -57,7 +61,7 @@ with st.sidebar:
     st.markdown(f"**{u['display_name']}**  \n{auth.ROLES[u['role']]}")
     if st.button("Sign out", icon=":material/logout:"):
         log("logout")
-        st.session_state.clear()
+        sign_out()
         st.rerun()
     st.divider()
     st.markdown(f"<span class='ww-platform'>{header_badge()}</span>", unsafe_allow_html=True)

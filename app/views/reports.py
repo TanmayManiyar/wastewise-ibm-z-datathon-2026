@@ -8,7 +8,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 import streamlit as st
 
-from wastewise import area, db, forecast, reports
+from wastewise import area, db, fmt, forecast, reports
 
 from ui.common import can, conn, synthetic_notice
 from ui.tables import Col, table
@@ -23,7 +23,8 @@ METHOD = {"gbt": "AI model (LightGBM boosted trees)", "hgb": "AI model (scikit-l
 
 
 def _day_label(iso: str) -> str:
-    return datetime.strptime(iso, "%Y-%m-%d").strftime("%a %d %b")
+    d = datetime.strptime(iso, "%Y-%m-%d")
+    return f"{d:%a} {d.day} {d:%b}"
 
 
 def _hour(h: int) -> str:
@@ -71,10 +72,10 @@ def sizing_tab(d: dict) -> None:
         def bigger(cap):
             return next((s for s in SIZES if s > cap), cap * 2)
         table([{"place": r["landmark"], "type": SITE_LABEL.get(r["site_type"], r["site_type"]),
-                "size": f"{r['capacity_l']:,} L",
+                "size": fmt.litres(r["capacity_l"]),
                 "full": f"{round(r['share_full_at_collection'] * r['collections'])} of {r['collections']} pickups",
                 "fill": r["mean_fill_at_collection"],
-                "todo": f"Replace with a {bigger(r['capacity_l']):,} L bin, or add a second pickup"}
+                "todo": f"Replace with a {fmt.litres(bigger(r['capacity_l']))} bin, or add a second pickup"}
                for r in sorted(small, key=lambda r: -r["share_full_at_collection"])],
               [Col("place", "Place"), Col("type", "Type"), Col("size", "Bin now"), Col("full", "Found full at"),
                Col("fill", "Usually this full at pickup", "bar"), Col("todo", "What to do")])
@@ -126,7 +127,7 @@ def festival_tab(d: dict) -> None:
     for f in d["fest"]:
         pct = (f["vs_normal"] - 1) * 100 if f["vs_normal"] else 0
         st.markdown(f"- **{f['festival']}** ({f['days']} days): **{abs(pct):.0f}% {'more' if pct >= 0 else 'less'}** "
-                    f"waste per day than a normal day ({f['mean_litres']:,} L a day).")
+                    f"waste per day than a normal day ({fmt.litres(f['mean_litres'])} a day).")
     fig = go.Figure()
     normal = [r for r in h if not r["festival"]]
     fig.add_bar(x=[r["date"] for r in normal], y=[r["litres"] for r in normal], name="normal day",
@@ -148,8 +149,8 @@ def outlook_tab(d: dict) -> None:
                  + ". Plan an extra truck or a second round on those days.")
     else:
         st.success("The trucks can carry the expected waste on each of the next 7 days.")
-    table([{"day": _day_label(x["date"]), "fest": x["festival"] or "", "waste": f"{x['expected_litres']:,} L",
-            "cap": f"{x['fleet_capacity_litres']:,} L",
+    table([{"day": _day_label(x["date"]), "fest": x["festival"] or "", "waste": fmt.litres(x["expected_litres"]),
+            "cap": fmt.litres(x["fleet_capacity_litres"]),
             "used": round(100 * x["expected_litres"] / x["fleet_capacity_litres"]),
             "ok": ("Extra trip needed", "red") if x["over_capacity"] else ("OK", "green")} for x in o],
           [Col("day", "Day"), Col("fest", "Festival"), Col("waste", "Expected waste"),
@@ -167,8 +168,8 @@ def savings_tab(d: dict) -> None:
     st.markdown(f"Compared with the old routine (each truck drives to the nearest waiting bin), over "
                 f"**{s['plans']} approved day(s)**" + (" - **demonstration data**:" if s["demonstration"] else ":"))
     a, b, c, e = st.columns(4)
-    a.metric("Less driving", f"{t['distance_km']['saved']:.0f} km",
-             f"{t['distance_km']['wastewise']:.0f} km instead of {t['distance_km']['routine']:.0f} km", delta_color="off")
+    a.metric("Less driving", fmt.km(t["distance_km"]["saved"]),
+             f"{fmt.km(t['distance_km']['wastewise'])} instead of {fmt.km(t['distance_km']['routine'])}", delta_color="off")
     b.metric("Less diesel", f"{t['fuel_l']['saved']:.0f} L", delta_color="off")
     c.metric("Less CO₂", f"{t['co2_kg']['saved']:.0f} kg", delta_color="off")
     e.metric("Fewer hours of overflowing bins", f"{t['expected_overflow_min']['saved'] / 60:.1f} h",

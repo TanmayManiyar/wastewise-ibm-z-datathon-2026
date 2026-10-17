@@ -12,13 +12,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from wastewise import audit, auth, config, db, platform_info  # noqa: E402
+from wastewise import audit, auth, config, db, fmt, platform_info, sessions  # noqa: E402
+from wastewise.fmt import (STATUS_COLOURS, duration, hhmm, km, km1, litres, when)  # noqa: E402,F401 - one formatting module
 
-STATUS_COLOURS = {"red": "#DC2626", "orange": "#EA580C", "amber": "#FACC15", "green": "#16A34A"}
-STATUS_WORDS = {"red": "full at shift start", "orange": "full by arrival", "amber": "over half full",
-                "green": "fine"}
+STATUS_WORDS = fmt.PLAN_WORDS
 LEVEL_ICON = {"critical": ":material/error:", "warning": ":material/warning:", "info": ":material/info:"}
-IDLE_LOGOUT_S = 30 * 60
 
 
 def conn():
@@ -29,13 +27,57 @@ def conn():
 
 
 def user() -> dict | None:
+    """The signed-in user. A reload or a dropped connection starts a new Streamlit session; the signed
+    session cookie (wastewise.sessions) brings the user back without a new sign-in until it expires."""
     u = st.session_state.get("user")
-    if u and time.time() - st.session_state.get("last_seen", 0) > IDLE_LOGOUT_S:
-        audit.log(conn(), u["username"], "logout", {"reason": "idle timeout"})
+    if u and u.get("session_exp") and time.time() >= u["session_exp"]:
+        audit.log(conn(), u["username"], "logout", {"reason": "session expired"})
         st.session_state.pop("user", None)
+        st.session_state["_clear_cookie"] = True
         return None
-    st.session_state.last_seen = time.time()
+    if not u:
+        try:
+            token = st.context.cookies.get(sessions.COOKIE)
+        except Exception:
+            token = None
+        u = sessions.check(conn(), token) if token else None
+        if u:
+            st.session_state.user = u
+            st.session_state["_cookie_written"] = True      # the browser already has it
+            audit.log(conn(), u["username"], "session_resumed", {"role": u["role"]})
     return u
+
+
+def sign_in(u: dict) -> None:
+    token, max_age = sessions.issue(u["username"], u["role"])
+    st.session_state.user = u | {"session_exp": int(time.time()) + max_age}
+    st.session_state["_cookie"] = (token, max_age)
+    st.session_state.pop("_cookie_written", None)
+
+
+def sign_out() -> None:
+    u = st.session_state.get("user")
+    if u:
+        sessions.revoke(conn(), u["username"])
+    keep = st.session_state.get("db")
+    st.session_state.clear()
+    if keep is not None:
+        st.session_state.db = keep
+    st.session_state["_clear_cookie"] = True
+
+
+def cookie_sync() -> None:
+    """Write or clear the session cookie in the browser (Streamlit itself cannot set cookies)."""
+    js = None
+    if st.session_state.pop("_clear_cookie", False):
+        js = f"document.cookie = '{sessions.COOKIE}=; Max-Age=0; Path=/; SameSite=Strict';"
+    elif st.session_state.get("_cookie") and not st.session_state.get("_cookie_written"):
+        token, max_age = st.session_state["_cookie"]
+        js = (f"document.cookie = '{sessions.COOKIE}={token}; Max-Age={int(max_age)}; Path=/; SameSite=Strict'"
+              " + (location.protocol === 'https:' ? '; Secure' : '');")
+        st.session_state["_cookie_written"] = True
+    if js:
+        st.html(f"<script>{js}</script>", unsafe_allow_javascript=True)
 
 
 def role() -> str | None:
@@ -52,16 +94,8 @@ def log(action: str, detail: dict | None = None) -> None:
     audit.log(conn(), u["username"] if u else None, action, detail or {})
 
 
-def hhmm(ts: float | None) -> str:
-    return "-" if ts is None else datetime.fromtimestamp(ts, config.IST).strftime("%H:%M")
-
-
-def when(ts: float | None) -> str:
-    return "-" if ts is None else datetime.fromtimestamp(ts, config.IST).strftime("%d %b %H:%M")
-
-
 def today_label(d) -> str:
-    return datetime.strptime(str(d), "%Y-%m-%d").strftime("%A %d %B %Y")
+    return fmt.day_name(str(d))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -130,19 +164,6 @@ def css() -> None:
 
 
 # ---------------------------------------------------------------- plain-language numbers
-def duration(minutes: float) -> str:
-    """150 -> '2 h 30 min', 40 -> '40 min'."""
-    m = int(round(max(0.0, float(minutes))))
-    if m < 60:
-        return f"{m} min"
-    h, r = divmod(m, 60)
-    return f"{h} h" + (f" {r} min" if r else "")
-
-
-def litres(v: float) -> str:
-    return f"{int(round(v)):,} L"
-
-
 def change(new: float, old: float, unit: str, fewer: str = "less", more: str = "more", digits: int = 0) -> str:
     """'32 km less than the old routine' style text."""
     d = round(new - old, digits)

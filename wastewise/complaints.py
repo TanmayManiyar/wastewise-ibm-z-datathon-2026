@@ -253,7 +253,7 @@ class Understanding:
         probs = ", ".join(PROBLEM_WORDS[p] for p in self.problems) or "a problem"
         if self.decision == "one":
             c = self.candidates[0]
-            return f"{probs} at {c.bin_id} {c.landmark} ({c.street})"
+            return f"{probs} at {c.landmark} ({c.street})"
         if self.decision == "choose":
             return f"{probs} - several places match, please choose"
         return f"{probs} - place not recognised, please choose the bin"

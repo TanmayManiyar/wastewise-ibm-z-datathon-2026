@@ -21,7 +21,7 @@ from .synth import plan_day_for
 
 HORIZON_MIN = 24 * 60 + 60
 SEARCH_PATIENCE = 800      # stop after this many iterations without a better plan
-SEARCH_CAP_S = 20.0        # safety cap on search time
+SEARCH_CAP_S = 35.0        # safety cap per search pass; plans are made in the background (jobs.py)
 
 
 class PlanError(Exception):
@@ -39,6 +39,12 @@ def plan_day(conn: sqlite3.Connection, now_ts: int | None = None) -> date:
     return plan_day_for(datetime.fromtimestamp(now_ts or db.now(), config.IST), s["shift_start"], s["shift_hours"])
 
 
+def today(now_ts: int | None = None) -> date:
+    """The calendar day in the ward office. Progress, live alerts, the crew phone and the evening round
+    follow this day; plan_day() is the next shift to plan (tomorrow once today's shift is over)."""
+    return datetime.fromtimestamp(now_ts or db.now(), config.IST).date()
+
+
 def in_shift(conn: sqlite3.Connection, now_ts: int | None = None) -> bool:
     now_ts = now_ts or db.now()
     s = db.get_settings(conn)
@@ -49,6 +55,9 @@ def in_shift(conn: sqlite3.Connection, now_ts: int | None = None) -> bool:
 def due_status(conn: sqlite3.Connection, bins: list[dict], day: date, now_ts: int) -> dict[str, dict]:
     out = {}
     for b in bins:
+        if day.weekday() in db.rest_days(b):
+            out[b["id"]] = {"due": False, "days_since": None, "last_ts": None, "rest_day": True}
+            continue
         last = conn.execute("SELECT MAX(ts) FROM events WHERE bin_id=? AND kind='collected' AND ts<=?",
                             (b["id"], now_ts)).fetchone()[0]
         if last is None:
@@ -392,8 +401,12 @@ def verify_context(ctx: Context) -> dict:
 def generate(conn: sqlite3.Connection, user: str | None = None, kind: str = "daily", now_ts: int | None = None,
              scenario: dict | None = None, seconds: float | None = None, max_iter: int = 100_000, seed: int = 1,
              bad_sensors: set[str] | None = None, replan_of: dict | None = None,
-             extra: dict | None = None) -> dict:
+             extra: dict | None = None, progress=None) -> dict:
+    """progress(phase, iterations, best_km) is called while the plan is made: phase "data" (reading
+    the latest data and forecasting), "search" (route search) and "check" (independent check)."""
     now_ts = now_ts or db.now()
+    report = progress or (lambda *a: None)
+    report("data", 0, None)
     if bad_sensors is None:
         try:
             from . import anomaly
@@ -403,14 +416,21 @@ def generate(conn: sqlite3.Connection, user: str | None = None, kind: str = "dai
     ctx = build_context(conn, now_ts, kind if kind != "whatif" else "daily", scenario, bad_sensors, replan_of,
                         extra)
     settings = ctx.settings
-    # The search runs until it stops finding better plans (safety cap 20 s) unless a caller fixes the time.
+    # The search runs until it stops finding better plans (safety cap SEARCH_CAP_S) unless a caller fixes the time.
     patience = None if seconds is not None else SEARCH_PATIENCE
     seconds = float(SEARCH_CAP_S if seconds is None else seconds)
-    sol, stats = optimiser.solve(ctx.prob, seconds=seconds, max_iter=max_iter, seed=seed, patience=patience)
+    def km(sol_) -> float:
+        return sum(ctx.prob.simulate(k, r)["dist_m"] for k, r in enumerate(sol_.routes)) / 1000
+
+    report("search", 0, None)
+    sol, stats = optimiser.solve(ctx.prob, seconds=seconds, max_iter=max_iter, seed=seed, patience=patience,
+                                 progress=lambda it, best: report("search", it, km(best)))
     if patience is not None and ctx.prob.nb:
         # One restart from the best plan with fresh exploration: makes the result consistent across runs.
+        done = stats.iterations
         sol2, st2 = optimiser.solve(ctx.prob, seconds=seconds, max_iter=max_iter, seed=seed + 1000,
-                                    patience=patience, start=sol)
+                                    patience=patience, start=sol,
+                                    progress=lambda it, best: report("search", done + it, km(best)))
         stats.iterations += st2.iterations
         stats.seconds += st2.seconds
         if sol2.total < sol.total - 1e-6:
@@ -418,6 +438,7 @@ def generate(conn: sqlite3.Connection, user: str | None = None, kind: str = "dai
             stats.best_cost = sol2.total
             stats.improvements += st2.improvements
     prob = ctx.prob
+    report("check", stats.iterations, km(sol))
 
     routes = [_route_json(ctx, k, r) for k, r in enumerate(sol.routes)]
     unserved = []
@@ -425,6 +446,7 @@ def generate(conn: sqlite3.Connection, user: str | None = None, kind: str = "dai
         bid = prob.bin_ids[b]
         K = prob.risk.cum_overflow_min.shape[1] - 1
         unserved.append({"bin_id": bid, "landmark": ctx.bins[bid]["landmark"], "due": bool(prob.due[b]),
+                         "rest_day": bool(ctx.due.get(bid, {}).get("rest_day")),
                          "reason": "no truck has space or time left" if prob.due[b] else "not needed today",
                          "expected_l": round(prob.load_at(b, ctx.shift_end_ts)),
                          "expected_overflow_min": round(float(prob.risk.cum_overflow_min[b, K]))})

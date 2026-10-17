@@ -8,13 +8,6 @@ from wastewise import complaints, db, live
 from ui.common import LEVEL_ICON, can, conn, hhmm, mark_seen, user
 
 
-@st.cache_resource
-def feed_thread() -> live.FeedThread:
-    t = live.FeedThread(interval=120)
-    t.start()
-    return t
-
-
 def tab(day) -> None:
     c = conn()
     by_id = {b["id"]: b for b in db.bins(c)}
@@ -46,9 +39,10 @@ def tab(day) -> None:
         st.divider()
         st.subheader("Demonstration tools (administrator only)")
         st.caption("Everything created here is labelled synthetic / TEST EVENT in the database and on screen.")
-        t = feed_thread()
-        on = bool(db.get_settings(c).get("demo_feed"))
-        new = st.toggle("Live demonstration feed (synthetic sensor readings every 2 minutes)", value=on)
+        t = live.demo_daemon()
+        on = live.feed_on(c)
+        new = st.toggle("Live demonstration feed (synthetic sensor readings every 2 minutes)", value=on,
+                        help="On by default in demonstration mode.")
         if new != on:
             with db.tx(c):
                 db.set_setting(c, "demo_feed", new)
@@ -57,6 +51,11 @@ def tab(day) -> None:
             st.rerun()
         if t.last_run:
             st.caption(f"Feed last added {t.last_count} readings at {hhmm(t.last_run)}.")
+        if t.last_roll:
+            st.caption(f"The synthetic history was moved forward to now at {hhmm(t.last_roll)} (it does this by "
+                       "itself when it is more than 2 hours old).")
+        if t.error:
+            st.caption(f"Demonstration feed problem: {t.error}")
         cols = st.columns([2, 2, 1])
         kind = cols[0].selectbox("Test event", list(live.TEST_EVENTS), format_func=live.TEST_EVENTS.get)
         bid = cols[1].selectbox("At bin", list(by_id), index=None, placeholder="choose a bin",

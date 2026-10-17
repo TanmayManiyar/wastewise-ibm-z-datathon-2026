@@ -11,7 +11,7 @@ from datetime import datetime
 
 from fpdf import FPDF
 
-from . import config
+from . import config, fmt
 
 BLUE = (29, 78, 216)
 GREY = (100, 116, 139)
@@ -39,11 +39,11 @@ def _latin(text) -> str:
 
 
 def _hm(ts) -> str:
-    return datetime.fromtimestamp(ts, config.IST).strftime("%H:%M") if ts else ""
+    return fmt.hhmm(ts) if ts else ""
 
 
 def _date(d: str) -> str:
-    return datetime.strptime(d, "%Y-%m-%d").strftime("%d %b %Y").lstrip("0")
+    return fmt.short_day(d)
 
 
 def _maps(lat, lon) -> str:
@@ -117,7 +117,7 @@ ROUTE_COLS = [("STOP", 13), ("ARRIVAL", 18), ("BIN", 19), ("LANDMARK", 64), ("ST
 
 
 def _fill_text(p: float) -> str:
-    return "Overflowing" if p > 105 else f"{min(p, 100):.0f}%"
+    return fmt.fill(p).capitalize()
 
 
 def _fit(pdf: FPDF, text: str, w: float) -> str:
@@ -132,7 +132,7 @@ def route_sheets(plan: dict, routes: list[dict], crew: dict[str, str] | None = N
     """One page (or more) per truck, in the layout ward offices use for paper route sheets."""
     crew = crew or {}
     pdf = _Doc(f"WasteWise - plan for {plan['plan_date']} ({plan.get('status', 'draft')}) - printed "
-               f"{datetime.now(config.IST).strftime('%d %b %Y %H:%M')}")
+               f"{fmt.when(datetime.now(config.IST).timestamp())}")
     pdf.alias_nb_pages()
     depot = depot_name.split(" (")[0].replace("vehicle depot", "depot")
     for r in routes:
@@ -142,7 +142,7 @@ def route_sheets(plan: dict, routes: list[dict], crew: dict[str, str] | None = N
         title = ("Evening collection route sheet" if plan.get("kind") == "extra" else "Collection route sheet")
         info = [("Date", _date(plan["plan_date"])), ("Departure", f"{_hm(r['start_ts'])} from {depot}"),
                 ("Planned return", _hm(t["end_ts"])), ("Stops", str(t["bins"])),
-                ("Distance", f"{t['distance_km']:.1f} km"), ("Driver", crew.get(r["vehicle_id"]) or "____________")]
+                ("Distance", fmt.km1(t["distance_km"])), ("Driver", crew.get(r["vehicle_id"]) or "____________")]
 
         def new_page():
             pdf.add_page()
@@ -178,7 +178,7 @@ def route_sheets(plan: dict, routes: list[dict], crew: dict[str, str] | None = N
                 span = sum(w for _, w in ROUTE_COLS[2:7])
                 mins = (s["depart_ts"] - s["arrive_ts"]) / 60
                 pdf.cell(span, 7, _latin(f"Turbhe landfill - unload (about {mins:.0f} min), truck carries about "
-                                         f"{s['load_before_l']:,.0f} L"), border=1, fill=True)
+                                         f"{fmt.litres(s['load_before_l'])}"), border=1, fill=True)
                 pdf.cell(ROUTE_COLS[7][1] + ROUTE_COLS[8][1], 7, "Left at:", border=1, fill=True)
                 pdf.ln()
             else:
@@ -200,7 +200,7 @@ def route_sheets(plan: dict, routes: list[dict], crew: dict[str, str] | None = N
 def shift_report(day: str, rows: list[dict], summary: dict[str, dict], labels: dict[str, str],
                  demo: bool = False) -> bytes:
     """End-of-shift report: per-truck totals, exceptions with what to do, every stop."""
-    pdf = _Doc(f"WasteWise end-of-shift report - {day} - printed {datetime.now(config.IST).strftime('%d %b %Y %H:%M')}")
+    pdf = _Doc(f"WasteWise end-of-shift report - {day} - printed {fmt.when(datetime.now(config.IST).timestamp())}")
     pdf.alias_nb_pages()
     pdf.add_page()
     tot = {k: sum(s[k] for s in summary.values()) for k in ("planned", "collected", "late", "problems", "missed")}

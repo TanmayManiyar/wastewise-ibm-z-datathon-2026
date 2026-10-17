@@ -5,7 +5,7 @@ import json
 
 import streamlit as st
 
-from wastewise import (audit, auth, beats, db, forecast, mildura, osm, platform_info, roads, synth, telum)
+from wastewise import (audit, auth, beats, db, fmt, forecast, mildura, osm, platform_info, roads, synth, telum)
 
 from ui.common import can, conn, mark_seen, user, when
 from ui.tables import Col, maps_url, table
@@ -15,12 +15,20 @@ from wastewise import area as _area
 SITE_LABEL = {x.key: x.label for x in _area.SITE_TYPES}
 
 
-def _detail_text(detail: str) -> str:
+def every_text(b: dict) -> str:
+    t = "every day" if b["collect_every_days"] == 1 else f"every {b['collect_every_days']} days"
+    return t + (", not on Sundays" if 6 in db.rest_days(b) else "")
+
+
+def _detail_text(detail: str, places: dict[str, str] | None = None) -> str:
     try:
         d = json.loads(detail)
     except ValueError:
         return detail[:120]
     skip = {"rows", "stats", "info", "vehicles"}
+    places = places or {}
+    if "bin_id" in d:     # people know places by name, not by bin code
+        d = {("place" if k == "bin_id" else k): (places.get(v, v) if k == "bin_id" else v) for k, v in d.items()}
     parts = [f"{k.replace('_', ' ')}: {v}" for k, v in d.items() if k not in skip and not isinstance(v, (dict, list))]
     return ", ".join(parts)[:140]
 
@@ -107,9 +115,9 @@ def settings_tab() -> None:
         st.markdown("**Bin register**")
         bins = db.bins(c, active_only=False)
         table([{"place": b["landmark"], "street": b["street"], "type": SITE_LABEL.get(b["site_type"], b["site_type"]),
-                "size": f"{b['capacity_l']:,} L", "imp": IMPORTANCE[b["priority"]].split(" (")[0],
+                "size": fmt.litres(b["capacity_l"]), "imp": IMPORTANCE[b["priority"]].split(" (")[0],
                 "sensor": "yes" if b["has_sensor"] else "no",
-                "every": "every day" if b["collect_every_days"] == 1 else f"every {b['collect_every_days']} days",
+                "every": every_text(b),
                 "use": ("In use", "green") if b["active"] else ("Not in use", "grey"), "map": (b["lat"], b["lon"])}
                for b in bins],
               [Col("place", "Place"), Col("street", "Street"), Col("type", "Type"), Col("size", "Size"),
@@ -135,11 +143,14 @@ def settings_tab() -> None:
                 every = a1.selectbox("Collect", [1, 2, 3, 7], index=[1, 2, 3, 7].index(b["collect_every_days"])
                                      if b["collect_every_days"] in (1, 2, 3, 7) else 0,
                                      format_func=lambda d: "every day" if d == 1 else f"every {d} days")
+                no_sun = a1.checkbox("Not on Sundays", "6" in str(b.get("rest_days") or ""),
+                                     help="For example schools and offices that are closed on Sundays.")
                 sensor = a2.checkbox("Has a fill sensor", bool(b["has_sensor"]))
                 active = a3.checkbox("In use", bool(b["active"]))
                 if st.form_submit_button("Save this bin", type="primary"):
                     new = {"landmark": landmark, "street": street, "site_type": stype, "capacity_l": int(cap),
                            "priority": int(prio), "collect_every_days": int(every), "has_sensor": int(sensor),
+                           "rest_days": "6" if no_sun else "",
                            "active": int(active)}
                     diff = {k: v for k, v in new.items() if str(v) != str(b[k])}
                     if diff:
@@ -184,8 +195,9 @@ def settings_tab() -> None:
                 f"{'Intact' if r['ok'] else 'TAMPERED'}: {r['checked']} entries checked"
                 + ("" if r["ok"] else f", first bad entry #{r['first_bad_id']}"))
         rec = audit.recent(c, 100)
+        names = {b["id"]: b["landmark"] for b in db.bins(c, active_only=False)}
         table([{"when": when(r["ts"]), "who": r["user"] or "system", "what": r["action"].replace("_", " "),
-                "detail": _detail_text(r["detail"])} for r in rec],
+                "detail": _detail_text(r["detail"], names)} for r in rec],
               [Col("when", "When"), Col("who", "Who"), Col("what", "What happened"), Col("detail", "Details")],
               max_height=320)
 
@@ -195,7 +207,7 @@ def fleet_tab() -> None:
     if not can("edit_fleet"):
         st.info("Only the administrator changes trucks and the depot.")
     vs = db.vehicles(c, active_only=False)
-    table([{"name": v["name"], "size": f"{v['capacity_l']:,} L", "colour": TRUCK_COLOURS.get(v["color"], v["color"]),
+    table([{"name": v["name"], "size": fmt.litres(v["capacity_l"]), "colour": TRUCK_COLOURS.get(v["color"], v["color"]),
             "use": ("In service", "green") if v["active"] else ("Out of service", "grey")} for v in vs],
           [Col("name", "Truck"), Col("size", "Carries"), Col("colour", "Colour on the map"), Col("use", "", "pill")])
     if can("edit_fleet"):

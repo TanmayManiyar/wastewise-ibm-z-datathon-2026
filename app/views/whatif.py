@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from wastewise import audit, db, planner
+from wastewise import audit, db, fmt, planner
 
 from ui import maps
 from ui.common import can, conn, duration, hhmm, mark_seen, synthetic_notice, user, vehicle_names
@@ -12,7 +12,7 @@ from ui.tables import Col, table
 # key, label, how to show a value, +1 if more is better / -1 if less is better / 0 neutral
 ROWS = [("bins_served", "Bins collected", lambda v: f"{v:.0f} bins", +1),
         ("due_left_out", "Due bins that do not fit", lambda v: f"{v:.0f} bins", -1),
-        ("distance_km", "Driving", lambda v: f"{v:.0f} km", -1),
+        ("distance_km", "Driving", fmt.km, -1),
         ("fuel_l", "Diesel", lambda v: f"{v:.0f} L", -1),
         ("co2_kg", "CO₂", lambda v: f"{v:.0f} kg", -1),
         ("expected_overflow_min", "Time bins spend overflowing", duration, -1),

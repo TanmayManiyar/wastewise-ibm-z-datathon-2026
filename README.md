@@ -139,8 +139,10 @@ big-endian, 3 vCPUs, Ubuntu 24.04, Python 3.12. Details and raw numbers are in
 
 ## Security
 
-- Passwords: PBKDF2-HMAC-SHA256 with a random salt and 600 000 iterations, lock-out after 5 failures,
-  sign-out after 30 min idle.
+- Passwords: PBKDF2-HMAC-SHA256 with a random salt and 600 000 iterations, lock-out after 5 failures.
+- Stay signed in: after sign-in the browser keeps an HMAC-SHA256-signed session cookie (key in
+  `secrets/session_key`), valid for one crew shift (12 h) or one office day (8 h), so a reload or a locked
+  phone does not sign anyone out. Sign-out clears it and invalidates every earlier cookie of that account.
 - Initial passwords are generated and written only to `secrets/initial_passwords.txt` (mode 600). They're
   never shown on the sign-in page.
 - **Hash-chained, tamper-evident audit log** of every action, with an integrity check (*Settings*).
@@ -179,7 +181,6 @@ bash scripts/services.sh start                  # web app :8501 and REST API :86
 - The depot location and landfill gate are approximate. Truck speeds, service times and fuel factors are
   demonstration values to be set by the ward.
 - The Telum accelerator didn't speed up these small tree ensembles on the shared z/VM guest (measured above).
-- Reloading the browser page signs you out, since Streamlit sessions don't use cookies.
 - The available Granite model is a *base* model: on the VM its briefings fail the figure check, so the
   templates are used. An instruction-tuned Granite GGUF (converted to big-endian) is needed for fluent text.
 - The public demo link is a Cloudflare *quick tunnel* (random `trycloudflare.com` address, no uptime

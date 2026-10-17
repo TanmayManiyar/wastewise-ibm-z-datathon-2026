@@ -91,6 +91,7 @@ class BinSpec:
     every_days: int
     daily_l: float
     profile: np.ndarray  # 24 weights summing to 1
+    rest: frozenset = frozenset()   # weekdays without collection (6 = Sunday)
 
 
 def _rng(seed: int, key: str) -> np.random.Generator:
@@ -116,7 +117,7 @@ def bin_specs(bins: list[dict], seed: int) -> list[BinSpec]:
         u = DAILY_FILL.get(b["site_type"], 0.7) * float(r.lognormal(0.0, 0.22))
         out.append(BinSpec(b["id"], b["site_type"], float(b["capacity_l"]), bool(b["has_sensor"]),
                            int(b["collect_every_days"]), u * float(b["capacity_l"]),
-                           hourly_profile(b["site_type"])))
+                           hourly_profile(b["site_type"]), frozenset(db.rest_days(b))))
     return out
 
 
@@ -187,6 +188,11 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
     final_state = {}
     stats = {"overflow_bin_hours": 0, "faults": 0, "missed": 0, "collections": 0}
 
+    # Bins collected every few days are split into alternate-day groups, as a ward does to balance the
+    # daily load (half of the every-2-days bins on even days, half on odd days).
+    multi = sorted(sp.id for sp in specs if sp.every_days > 1)
+    group_of = {bid: k for k, bid in enumerate(multi)}
+
     for sp in specs:
         r = _rng(seed, "sim" + sp.id)
         week = np.array(WEEKLY.get(sp.site_type, [1] * 7))
@@ -203,20 +209,21 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
         visit_min = 10 + slot_of[sp.id] * 9   # minutes after shift start
         vol = np.empty(H)
         v = float(r.uniform(0.0, 0.3)) * sp.capacity_l
-        last_collect_day = dates[0] - timedelta(days=int(r.integers(0, sp.every_days)))
+        group = group_of.get(sp.id, 0) % sp.every_days
+        retry = False                         # missed yesterday: the routine tries again today
         overflow_since = None
         for i in range(H):
             vol[i] = v
             d = dates[i]
             collect_here = False
-            if hod[i] == hh + (mm + visit_min) // 60 and d < plan_day and (d - last_collect_day).days >= sp.every_days:
+            due_now = ((d.toordinal() + group) % sp.every_days == 0 or retry) and dow[i] not in sp.rest
+            if hod[i] == hh + (mm + visit_min) // 60 and d < plan_day and due_now:
                 miss_p = 0.06 if calendar_in.is_monsoon(d) else 0.04
                 if r.random() < miss_p:
                     events.append((int(hour_ts[i] + ((mm + visit_min) % 60) * 60), sp.id, truck_of[sp.id],
                                    None, "could_not_reach", None, 1, "synthetic", "routine round (synthetic)"))
                     stats["missed"] += 1
-                    # skipped today; the routine tries again tomorrow
-                    last_collect_day = d - timedelta(days=sp.every_days - 1)
+                    retry = True      # skipped today; the routine tries again tomorrow
                 else:
                     collect_here = True
             if collect_here:
@@ -235,7 +242,7 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
                             c["resolved_at"] = ts_c
                 overflow_since = None
                 v = float(r.uniform(0.0, 0.03)) * sp.capacity_l + gen[i] * (60 - m) / 60
-                last_collect_day = d
+                retry = False
             else:
                 v = v + gen[i]
             pct = v / sp.capacity_l * 100

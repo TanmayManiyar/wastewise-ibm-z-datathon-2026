@@ -146,6 +146,19 @@ def route_for(conn: sqlite3.Connection, day: str, vehicle_id: str) -> tuple[dict
     return out
 
 
+def crew_day(conn: sqlite3.Connection, vehicle_id: str, now_ts: int | None = None) -> str:
+    """Which day's route the crew phone shows: today's while it has stops left, otherwise the next
+    shift's approved route (for example tomorrow's, in the evening)."""
+    today = planner.today(now_ts).isoformat()
+    p, r = route_for(conn, today, vehicle_id)
+    if r and any(s_ == "todo" and stp["kind"] != "depot" for s_, stp in zip(stop_states(conn, p, r), r["stops"])):
+        return today
+    nxt = planner.plan_day(conn, now_ts).isoformat()
+    if nxt != today and route_for(conn, nxt, vehicle_id)[1]:
+        return nxt
+    return today
+
+
 def stop_states(conn: sqlite3.Connection, plan: dict, route: dict) -> list[str]:
     """'done' / 'todo' for each stop of the route, from crew updates."""
     since, _ = _window(conn, plan["plan_date"], _round(plan))

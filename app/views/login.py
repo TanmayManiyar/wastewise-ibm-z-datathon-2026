@@ -2,7 +2,7 @@ import streamlit as st
 
 from wastewise import auth
 
-from ui.common import conn, header_badge
+from ui.common import conn, header_badge, sign_in
 
 
 def page() -> None:
@@ -18,10 +18,12 @@ def page() -> None:
         if ok:
             user = auth.authenticate(conn(), u, p)
             if user:
-                st.session_state.user = user
+                sign_in(user)
                 st.rerun()
             else:
                 st.error("Sign-in failed. Check the user name and password. After 5 wrong tries the account "
                          "is locked for 5 minutes.")
         st.caption("New installation? The administrator finds the first passwords in "
                    "`secrets/initial_passwords.txt` on the server.")
+        st.caption("You stay signed in on this device for one shift (crews 12 hours, office 8 hours), even if you "
+                   "reload the page or the phone locks. Press **Sign out** on shared devices.")

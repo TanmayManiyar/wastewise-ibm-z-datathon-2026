@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import datetime
 
-from . import anomaly, audit, complaints, config, db, planner, progress, state
+from . import anomaly, audit, complaints, config, db, fmt, planner, progress, state
 
 
 REASON = {"stuck": "it has shown the same value for hours", "spike": "it jumps up and down",
@@ -21,12 +21,12 @@ STATUS_TEXT = {"could_not_reach": "could not reach the bin", "bin_missing": "bin
 
 
 def _hm(ts) -> str:
-    return datetime.fromtimestamp(ts, config.IST).strftime("%H:%M") if ts else "-"
+    return fmt.hhmm(ts) if ts else "-"
 
 
 def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
     now_ts = now_ts or db.now()
-    day = planner.plan_day(conn, now_ts).isoformat()
+    day = planner.today(now_ts).isoformat()
     bins = {b["id"]: b for b in db.bins(conn)}
     out: list[dict] = []
     # Complaints waiting for a place confirmation, and open urgent ones.
@@ -110,25 +110,76 @@ def feed_step(conn: sqlite3.Connection, now_ts: int | None = None, seed: int | N
     return n
 
 
-class FeedThread(threading.Thread):
-    """Runs feed_step every `interval` seconds while Settings 'demo_feed' is on."""
+def feed_on(conn: sqlite3.Connection) -> bool:
+    """The live demonstration feed is on by default in demonstration mode ("auto")."""
+    v = db.get_settings(conn).get("demo_feed", "auto")
+    return bool(db.get_meta(conn, "synthetic_info")) if v == "auto" else bool(v)
 
-    def __init__(self, interval: int = 120):
-        super().__init__(daemon=True, name="wastewise-demo-feed")
-        self.interval = interval
+
+ROLL_AFTER_S = 2 * 3600     # roll the synthetic history forward once it is older than this
+ROLL_CHECK_S = 3600         # ... checked at start-up and then every hour
+FEED_EVERY_S = 120
+
+
+def roll_forward_if_old(conn: sqlite3.Connection, now_ts: int | None = None) -> dict | None:
+    """Demonstration mode: regenerate the synthetic history up to now when it ends more than 2 hours ago,
+    so the demo always shows 'today'. Records entered by people or the API are kept."""
+    now_ts = now_ts or db.now()
+    raw = db.get_meta(conn, "synthetic_info")
+    if not raw:
+        return None
+    info = json.loads(raw)
+    if now_ts - int(info.get("end_ts", 0)) <= ROLL_AFTER_S:
+        return None
+    from . import synth
+    new = synth.generate(conn, end_ts=now_ts, days=int(info.get("days", 180)), seed=int(info.get("seed", 2026)))
+    audit.log(conn, "system", "synthetic_rolled_forward",
+              {"from": _hm(info.get("end_ts")), "to": _hm(new["end_ts"]), "rows": new["rows"]})
+    return new
+
+
+class DemoDaemon(threading.Thread):
+    """One per web-app process: rolls the synthetic history forward (start-up, then hourly) and runs the
+    live demonstration feed (a synthetic reading per sensor bin every 2 minutes) while it is on."""
+
+    def __init__(self):
+        super().__init__(daemon=True, name="wastewise-demo")
         self.last_run: int | None = None
         self.last_count = 0
+        self.last_roll: int | None = None
+        self.last_check = 0.0
+        self.error: str | None = None
 
     def run(self) -> None:
         conn = db.connect()
+        next_feed = 0.0
         while True:
             try:
-                if db.get_settings(conn).get("demo_feed"):
+                if time.time() - self.last_check >= ROLL_CHECK_S:
+                    self.last_check = time.time()
+                    if roll_forward_if_old(conn):
+                        self.last_roll = db.now()
+                if feed_on(conn) and time.time() >= next_feed:
+                    next_feed = time.time() + FEED_EVERY_S
                     self.last_count = feed_step(conn)
                     self.last_run = db.now()
-            except Exception:
-                pass
-            time.sleep(self.interval)
+                self.error = None
+            except Exception as exc:     # keep the thread alive; shown under Demonstration tools
+                self.error = f"{type(exc).__name__}: {exc}"
+            time.sleep(15)
+
+
+_DAEMON: DemoDaemon | None = None
+_DAEMON_LOCK = threading.Lock()
+
+
+def demo_daemon() -> DemoDaemon:
+    global _DAEMON
+    with _DAEMON_LOCK:
+        if _DAEMON is None or not _DAEMON.is_alive():
+            _DAEMON = DemoDaemon()
+            _DAEMON.start()
+        return _DAEMON
 
 
 # ------------------------------------------------------------------ test events
@@ -151,22 +202,22 @@ def inject(conn: sqlite3.Connection, kind: str, bin_id: str, user: str) -> str:
         text = random.choice(HINDI).format(lm=lm)
         und = complaints.understand(text, complaints.PlaceIndex(db.bins(conn)))
         cid = complaints.record(conn, text, None, und, "api:test", reporter="test event", synthetic=True, status="new")
-        desc = f"complaint #{cid}: {text}"
+        desc = f"complaint: {text}"
     elif kind == "overflow_reading":
         db.add_reading(conn, bin_id, 100.0, "api", ts=now, user="api:test", note=note, synthetic=True)
-        desc = f"{bin_id} reported 100 % full"
+        desc = f"{b['landmark']} reported 100% full"
     elif kind == "stuck_sensor":
         with db.tx(conn):
             for h in range(13):
                 db.add_reading(conn, bin_id, 37.0, "api", ts=now - (12 - h) * 3600 + 30, user="api:test", note=note,
                                synthetic=True)
-        desc = f"{bin_id} sensor stuck at 37 % for 12 h"
+        desc = f"the sensor at {b['landmark']} stuck at 37% for 12 hours"
     elif kind == "surge":
         with db.tx(conn):
             for h, f in enumerate([30, 45, 60, 75, 92]):
                 db.add_reading(conn, bin_id, f, "api", ts=now - (4 - h) * 3600 + 20, user="api:test", note=note,
                                synthetic=True)
-        desc = f"{bin_id} rose from 30 % to 92 % in 4 h"
+        desc = f"{b['landmark']} rose from 30% to 92% in 4 hours"
     else:
         raise ValueError(kind)
     audit.log(conn, user, "test_event_injected", {"kind": kind, "bin_id": bin_id, "detail": desc})

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS bins (
     has_sensor INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     collect_every_days INTEGER NOT NULL DEFAULT 1,
+    rest_days TEXT NOT NULL DEFAULT '',  -- weekdays without collection: 0 = Monday ... 6 = Sunday
     osm_ref TEXT,                  -- source OSM element of the landmark
     created_at INTEGER NOT NULL
 );
@@ -187,10 +188,36 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
 def init(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('data_version', '0')")
     conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')")
+    # additive migrations for databases created by an older version
+    if "rest_days" not in _columns(conn, "bins"):
+        conn.execute("ALTER TABLE bins ADD COLUMN rest_days TEXT NOT NULL DEFAULT ''")
+    migrate_demo_register(conn)
+
+
+def migrate_demo_register(conn: sqlite3.Connection) -> None:
+    """Demonstration register, revision 2: realistic collection days. Schools are not collected on
+    Sundays and the public office every second day (parks and playgrounds already were). Only applied
+    to the demonstration database, and only to bins still on the old default."""
+    if conn.execute("SELECT value FROM meta WHERE key='demo_register_rev'").fetchone():
+        return
+    if not conn.execute("SELECT 1 FROM meta WHERE key='synthetic_info'").fetchone():
+        return
+    conn.execute("UPDATE bins SET rest_days='6' WHERE site_type='school' AND rest_days=''")
+    conn.execute("UPDATE bins SET collect_every_days=2 WHERE site_type='public_office' AND collect_every_days=1")
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('demo_register_rev', '2')")
+    bump_version(conn)
+
+
+def rest_days(b: dict) -> set[int]:
+    return {int(x) for x in str(b.get("rest_days") or "").split(",") if x.strip().isdigit()}
 
 
 @contextmanager
@@ -248,7 +275,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "map_tiles": "osm",                # osm (browser loads OpenStreetMap tiles) | offline
     "llm_enabled": True,
     "llm_url": "http://127.0.0.1:8080",  # local llama.cpp server running IBM Granite
-    "demo_feed": False,
+    "demo_feed": "auto",               # auto = on in demonstration mode | True | False
 }
 
 

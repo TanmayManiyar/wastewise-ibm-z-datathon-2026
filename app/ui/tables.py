@@ -14,6 +14,8 @@ from typing import Any, Callable
 
 import streamlit as st
 
+from wastewise import fmt
+
 PILL = {"red": ("#FEE2E2", "#991B1B"), "orange": ("#FFEDD5", "#9A3412"), "amber": ("#FEF9C3", "#854D0E"),
         "green": ("#DCFCE7", "#166534"), "blue": ("#DBEAFE", "#1E40AF"), "grey": ("#F1F5F9", "#334155")}
 
@@ -51,13 +53,14 @@ def pill(text: str, colour: str = "grey") -> str:
     return f"<span class='ww-pill' style='background:{bg};color:{fg}'>{html.escape(str(text))}</span>"
 
 
-def bar(pct: float | None, label: str | None = None) -> str:
+def bar(pct: float | None, label: str | None = None, status: str | None = None) -> str:
+    """Fill bar in the shared colour scale (wastewise.fmt); `status` gives the colour when known."""
     if pct is None:
         return "-"
     p = max(0.0, float(pct))
-    colour = "#DC2626" if p >= 100 else "#F59E0B" if p >= 50 else "#16A34A"
+    colour = fmt.STATUS_COLOURS[status] if status in fmt.STATUS_COLOURS else fmt.colour_for_fill(p)
     width = min(p, 100.0)
-    txt = html.escape(label if label is not None else ("overflowing" if p > 105 else f"{p:.0f}%"))
+    txt = html.escape(label if label is not None else fmt.fill(p))
     return f"<span class='ww-bar'><span style='width:{width:.0f}%;background:{colour}'></span></span>{txt}"
 
 
@@ -69,7 +72,8 @@ def _cell(row: dict, c: Col) -> tuple[str, str]:
         lat, lon = v
         return f"<a class='ww-maplink' href='{maps_url(lat, lon)}' target='_blank' rel='noopener'>📍 Map</a>", ""
     if c.kind == "bar":
-        return bar(v), ""
+        return (bar(*v) if isinstance(v, tuple) and len(v) == 3 else bar(v[0], status=v[1]) if isinstance(v, tuple)
+                else bar(v)), ""
     if c.kind == "pill":
         if not v:
             return "", ""
