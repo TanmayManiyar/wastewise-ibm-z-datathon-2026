@@ -37,6 +37,16 @@ else:
     pages.append(st.Page(help_view.page, title="Help", icon=":material/help:", url_path="help"))
 
 nav = st.navigation(pages)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _llm_ok(_v: int) -> str | None:
+    from wastewise import db, llm
+    s = llm.status(db.connect())
+    return "Granite" if s["ok"] else None
+
+
+st.session_state._llm_label = _llm_ok(0)
 with st.sidebar:
     st.markdown("### WasteWise")
     st.caption("Sanpada ward office · NMMC")

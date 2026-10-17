@@ -247,6 +247,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "telum_inference": "auto",         # auto | cpu | accelerator
     "map_tiles": "osm",                # osm (browser loads OpenStreetMap tiles) | offline
     "llm_enabled": True,
+    "llm_url": "http://127.0.0.1:8080",  # local llama.cpp server running IBM Granite
     "demo_feed": False,
 }
 

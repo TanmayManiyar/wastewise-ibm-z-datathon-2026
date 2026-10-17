@@ -75,7 +75,7 @@ def route_table(route: dict) -> pd.DataFrame:
     for s in route["stops"]:
         if s["kind"] == "bin":
             n += 1
-            rows.append({"#": n, "Time": hhmm(s["arrive_ts"]), "Bin": s["bin_id"], "Place": s["landmark"],
+            rows.append({"#": str(n), "Time": hhmm(s["arrive_ts"]), "Bin": s["bin_id"], "Place": s["landmark"],
                          "Street": s["street"], "Expected fill": f"{s['expected_fill_pct']:.0f}%",
                          "Status": STATUS_WORDS[s["status"]], "Pick-up (L)": s["pickup_l"],
                          "Load after (L)": s["load_after_l"], "Own area": "yes" if s["own_beat"] else "helping"})

@@ -104,6 +104,18 @@ def report_tab() -> None:
             else:
                 q = "We could not recognise the place - choose the bin"
                 options = [b["id"] for b in bins]
+                from wastewise import llm
+                if llm.status(c)["ok"] and box.button("Ask Granite which place is meant"):
+                    words = llm.complaint_place_words(c, text)
+                    if words:
+                        und2 = complaints.understand(" ".join(words) + " " + text, _index())
+                        st.session_state.understood = (text, und2)
+                        st.session_state.granite_words = words
+                        st.rerun()
+                    box.info("Granite did not find a place name either.")
+            if st.session_state.get("granite_words") and und.decision != "none":
+                box.caption("Place words suggested by IBM Granite: " + ", ".join(st.session_state.granite_words)
+                            + " - please confirm the bin.")
             choice = box.radio(q, options, index=None, key="complaint_choice",
                                format_func=lambda x: f"{x} · {by_id[x]['landmark']} · {by_id[x]['street']}")
             other = box.selectbox("Or pick another bin", [b["id"] for b in bins], index=None,
