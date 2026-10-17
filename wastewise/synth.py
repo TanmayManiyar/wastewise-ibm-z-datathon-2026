@@ -237,9 +237,13 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
                                "routine round (synthetic)"))
                 stats["collections"] += 1
                 if overflow_since is not None:
+                    # Complaints are never closed by the system: a supervisor checks and closes them some
+                    # hours after the collection. Recent ones are left open ("ready to close" in the demo).
                     for c in complaints:
                         if c["bin_id"] == sp.id and c["resolved_at"] is None:
-                            c["resolved_at"] = ts_c
+                            t_close = ts_c + int(r.integers(1800, 6 * 3600))
+                            if t_close <= end_ts - 12 * 3600:
+                                c["resolved_at"] = t_close
                 overflow_since = None
                 v = float(r.uniform(0.0, 0.03)) * sp.capacity_l + gen[i] * (60 - m) / 60
                 retry = False
@@ -309,7 +313,7 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
                          " resolved_by, resolved_at, parsed, synthetic) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
                          (c["ts"], c["text"], c["lang"], c["bin_id"], "overflowing",
                           "resolved" if c["resolved_at"] else "open", "citizen (synthetic)", "synthetic",
-                          "synthetic" if c["resolved_at"] else None, c["resolved_at"], None))
+                          "supervisor (synthetic)" if c["resolved_at"] else None, c["resolved_at"], None))
         info = {"seed": seed, "days": days, "start_ts": int(hour_ts[0]), "end_ts": int(hour_ts[-1]),
                 "plan_day": plan_day.isoformat(), "generated_at": db.now(),
                 "rows": {"readings": len(readings), "events": len(events), "complaints": len(complaints)},

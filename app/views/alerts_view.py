@@ -21,6 +21,11 @@ def tab(day) -> None:
         for a in items:
             fn = {"critical": st.error, "warning": st.warning}.get(a["level"], st.info)
             fn(f"**{hhmm(a['ts'])} · {a['text']}**  \nWhat to do: {a['action']}", icon=LEVEL_ICON[a["level"]])
+            if a["kind"] == "complaint_ready" and can("complaints"):
+                if st.button(f"Close {complaints.ref(a['id'])}", key=f"close_{a['id']}", icon=":material/task_alt:"):
+                    complaints.resolve(c, a["id"], user()["username"], note="closed from Live alerts")
+                    mark_seen()
+                    st.rerun()
             if a["kind"] == "complaint_new" and can("complaints"):
                 cols = st.columns([3, 1])
                 opts = a["candidates"] or list(by_id)

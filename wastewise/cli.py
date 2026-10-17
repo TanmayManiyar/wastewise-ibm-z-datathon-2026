@@ -35,6 +35,8 @@ def cmd_init(args) -> None:
         info = synth.generate(conn, days=args.days)
         audit.log(conn, "system", "synthetic_generated", info)
         print("Synthetic demonstration history:", json.dumps(info["rows"]))
+        from . import crews
+        crews.seed_demo(conn)
     print("Database:", config.DB_PATH)
 
 

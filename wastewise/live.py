@@ -38,12 +38,22 @@ def alerts(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict]:
                     "id": c["id"], "text": f"New complaint in {lang}: “{c['text']}”",
                     "action": f"Probably {cands} - confirm the bin below.",
                     "candidates": [x["bin_id"] for x in p.get("candidates", [])]})
+    ready = {c["id"]: c for c in complaints.ready_to_close(conn)}
+    for c in ready.values():
+        b = bins.get(c["bin_id"], {})
+        out.append({"level": "info", "kind": "complaint_ready", "ts": c["followup"]["ts"], "id": c["id"],
+                    "text": f"Complaint {complaints.ref(c['id'])} at {b.get('landmark', 'a bin')}: "
+                            f"{complaints.followup_text(c['followup'])} - ready to close",
+                    "action": "Check that the problem is gone (call the citizen if needed), then press Close. "
+                              "WasteWise never closes complaints by itself."})
     for c in db.rows(conn, "SELECT * FROM complaints WHERE status='open' AND ts>=? ORDER BY ts DESC LIMIT 20",
                      (now_ts - 86400,)):
+        if c["id"] in ready:
+            continue
         urgent = c["problem"] in complaints.URGENT
         b = bins.get(c["bin_id"], {})
         out.append({"level": "critical" if urgent else "warning", "kind": "complaint", "ts": c["ts"], "id": c["id"],
-                    "text": f"Complaint at {b.get('landmark', 'an unconfirmed place')}: "
+                    "text": f"Complaint {complaints.ref(c['id'])} at {b.get('landmark', 'an unconfirmed place')}: "
                             f"{complaints.PROBLEM_WORDS.get(c['problem'], c['problem'])} (since {_hm(c['ts'])})",
                     "action": "Send the nearest crew now - fire or dead animal is a health risk." if urgent else
                               "Bin now shows as full; check its planned visit or Re-plan from now."})
@@ -153,6 +163,11 @@ class DemoDaemon(threading.Thread):
     def run(self) -> None:
         conn = db.connect()
         next_feed = 0.0
+        try:
+            from . import crews
+            crews.seed_demo(conn)          # labelled demonstration crew list (only if none exists)
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
         while True:
             try:
                 if time.time() - self.last_check >= ROLL_CHECK_S:

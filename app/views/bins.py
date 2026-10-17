@@ -169,62 +169,143 @@ def report_tab() -> None:
                                   format_func=lambda x: bin_label(by_id[x]))
             chosen = other or choice
             if box.button("Confirm and save", type="primary", disabled=chosen is None):
-                complaints.record(c, text, chosen, und, user()["username"], reporter or None)
+                cid = complaints.record(c, text, chosen, und, user()["username"], reporter or None)
                 st.session_state.pop("understood", None)
                 st.session_state.highlight_bin = chosen
+                st.session_state["complaint_focus"] = cid
                 mark_seen()
-                st.success(f"Saved for {by_id[chosen]['landmark']}. The bin now shows as full on every screen "
-                           "and the control room sees it under Live alerts.")
+                st.success(f"Saved as **{complaints.ref(cid)}** for {by_id[chosen]['landmark']}. The bin now shows "
+                           "as full on every screen and the control room sees it under Live alerts. Give the "
+                           "citizen the reference number - or send the acknowledgement below.")
+    register(by_id)
+
+
+LANG_WORDS = {"en": "English", "hi": "Hindi", "mr": "Marathi", "mixed": "mixed"}
+MSG_LANGS = {"en": "English", "hi": "हिंदी", "mr": "मराठी"}
+
+
+def _place(r: dict, by_id: dict) -> str:
+    if r["bin_id"] not in by_id:
+        return "place not confirmed yet"
+    p = by_id[r["bin_id"]]["landmark"]
+    if r["original_bin_id"] and r["original_bin_id"] in by_id:
+        p += f" (first filed at {by_id[r['original_bin_id']]['landmark']})"
+    return p
+
+
+def _close(cid: int) -> None:
+    complaints.resolve(conn(), cid, user()["username"])
+    mark_seen()
+
+
+def register(by_id: dict) -> None:
+    c = conn()
+    bins = list(by_id.values())
+    ready = complaints.ready_to_close(c)
+    if ready:
+        with st.container(border=True):
+            st.markdown(f"##### Ready to close ({len(ready)})")
+            st.caption("The bin has been collected since these complaints came in. Check the problem is gone, "
+                       "then close - WasteWise never closes a complaint by itself.")
+            for r in ready[:8]:
+                a, b = st.columns([4, 1])
+                a.markdown(f"**{complaints.ref(r['id'])}** · {_place(r, by_id)} · "
+                           f"{complaints.followup_text(r['followup'])} - ready to close")
+                if can("complaints"):
+                    b.button("Close", key=f"rc_{r['id']}", on_click=_close, args=(r["id"],),
+                             icon=":material/task_alt:", use_container_width=True)
+            if len(ready) > 8:
+                st.caption(f"{len(ready) - 8} more in the register below (filter: open).")
+
     st.subheader("Complaint register")
     flt = st.segmented_control("Show", ["new", "open", "resolved", "all"], default="open", key="compl_filter",
-                               format_func={"new": "new (place to confirm)", "open": "open", "resolved": "resolved",
+                               format_func={"new": "new (place to confirm)", "open": "open", "resolved": "closed",
                                             "all": "all"}.get) or "open"
     q = "SELECT * FROM complaints" + ("" if flt == "all" else " WHERE status = ?") + " ORDER BY ts DESC LIMIT 200"
     rows = db.rows(c, q, () if flt == "all" else (flt,))
     if not rows:
         st.info("No complaints.")
         return
-    lang = {"en": "English", "hi": "Hindi", "mr": "Marathi", "mixed": "mixed"}
-    status_pill = {"new": ("Place to confirm", "orange"), "open": ("Open", "red"), "resolved": ("Resolved", "green")}
+    status_pill = {"new": ("Place to confirm", "orange"), "open": ("Open", "red"), "resolved": ("Closed", "green")}
 
-    def place(r):
-        if r["bin_id"] not in by_id:
-            return "place not confirmed yet"
-        p = by_id[r["bin_id"]]["landmark"]
-        if r["original_bin_id"] and r["original_bin_id"] in by_id:
-            p += f" (first filed at {by_id[r['original_bin_id']]['landmark']})"
-        return p
+    def follow(r):
+        if r["status"] == "resolved":
+            return f"closed {when(r['resolved_at'])} by {r['resolved_by'] or '-'}"
+        f = complaints.followup(c, r)
+        return complaints.followup_text(f) + " - ready to close" if f else "waiting for collection"
 
-    table([{"when": when(r["ts"]), "place": place(r),
+    table([{"ref": complaints.ref(r["id"]), "when": when(r["ts"]), "place": _place(r, by_id),
             "problem": complaints.PROBLEM_WORDS.get(r["problem"], r["problem"] or "other"),
-            "text": r["text"], "lang": lang.get(r["lang"], r["lang"] or ""), "status": status_pill.get(r["status"]),
+            "text": r["text"], "lang": LANG_WORDS.get(r["lang"], r["lang"] or ""),
+            "status": status_pill.get(r["status"]), "follow": follow(r),
             "demo": "demo data" if r["synthetic"] else ""} for r in rows],
-          [Col("when", "When"), Col("place", "Place"), Col("problem", "Problem"), Col("text", "What was said"),
-           Col("lang", "Language"), Col("status", "Status", "pill"), Col("demo", "")], max_height=480)
+          [Col("ref", "Reference"), Col("when", "When"), Col("place", "Place"), Col("problem", "Problem"),
+           Col("text", "What was said"), Col("lang", "Language"), Col("status", "Status", "pill"),
+           Col("follow", "Follow-up"), Col("demo", "")], max_height=480)
+
+    ids = [r["id"] for r in rows]
+    focus = st.session_state.get("complaint_focus")
+    if focus is not None and focus not in ids:
+        extra = db.one(c, "SELECT * FROM complaints WHERE id=?", (focus,))
+        if extra:
+            rows.insert(0, extra)
+            ids.insert(0, focus)
 
     def label(cid):
         r = next(x for x in rows if x["id"] == cid)
-        return f"{when(r['ts'])} · {place(r)} · {complaints.PROBLEM_WORDS.get(r['problem'], r['problem'] or 'other')}"
+        return (f"{complaints.ref(cid)} · {when(r['ts'])} · {_place(r, by_id)} · "
+                f"{complaints.PROBLEM_WORDS.get(r['problem'], r['problem'] or 'other')}")
+
+    st.markdown("##### One complaint: follow up, close, tell the citizen")
+    cid = st.selectbox("Complaint", ids, index=ids.index(focus) if focus in ids else None,
+                       placeholder="choose the complaint", format_func=label, key="compl_pick")
+    if cid is not None:
+        complaint_panel(next(x for x in rows if x["id"] == cid), by_id, follow)
 
     if can("complaints"):
-        open_ids = [r["id"] for r in rows if r["status"] == "open"]
-        col1, col2 = st.columns(2)
-        with col1.form("resolve"):
-            cid = st.selectbox("Mark as resolved", open_ids, index=None, placeholder="choose the complaint",
-                               format_func=label)
-            if st.form_submit_button("Resolve") and cid:
-                complaints.resolve(c, cid, user()["username"])
-                mark_seen()
-                st.rerun()
-        with col2.form("move"):
-            cid = st.selectbox("Move a report to the right bin", [r["id"] for r in rows], index=None,
-                               placeholder="choose the complaint", format_func=label)
+        with st.form("move"):
+            cid2 = st.selectbox("Move a report to the right bin", ids, index=None,
+                                placeholder="choose the complaint", format_func=label)
             nb = st.selectbox("Right bin", [b["id"] for b in bins], index=None, placeholder="choose the bin",
                               format_func=lambda x: bin_label(by_id[x]))
-            if st.form_submit_button("Move (original kept)") and cid and nb:
-                complaints.move(c, cid, nb, user()["username"])
+            if st.form_submit_button("Move (original kept)") and cid2 and nb:
+                complaints.move(c, cid2, nb, user()["username"])
                 mark_seen()
                 st.rerun()
+
+
+def complaint_panel(r: dict, by_id: dict, follow) -> None:
+    """Follow-up, Close, and WhatsApp messages for the citizen (the user presses Send in WhatsApp)."""
+    c = conn()
+    cid = r["id"]
+    place_name = by_id[r["bin_id"]]["landmark"] if r["bin_id"] in by_id else "your area"
+    problem = complaints.PROBLEM_WORDS.get(r["problem"], r["problem"] or "other")
+    with st.container(border=True):
+        st.markdown(f"**{complaints.ref(cid)}** · {_place(r, by_id)} · {problem} · reported {when(r['ts'])}"
+                    + (f" by {r['reporter']}" if r["reporter"] else ""))
+        st.markdown(f"> {r['text']}")
+        st.markdown(f"**Follow-up:** {follow(r)}")
+        lang = st.segmented_control("Message language", list(MSG_LANGS), format_func=MSG_LANGS.get,
+                                    default=complaints.message_lang(r), key=f"msg_lang_{cid}") or "en"
+        ack = complaints.acknowledgement(r, place_name, lang)
+        res = complaints.resolution(c, r, place_name, lang) if r["status"] == "resolved" else None
+        bar_ = st.container(horizontal=True)
+        if r["status"] == "open" and can("complaints"):
+            bar_.button("Close complaint", key=f"close_{cid}", on_click=_close, args=(cid,), type="primary",
+                        icon=":material/task_alt:")
+        bar_.link_button("Share acknowledgement", complaints.whatsapp_url(ack, r["reporter"]),
+                         icon=":material/share:", help="Opens WhatsApp with the message filled in - you press Send.")
+        if res:
+            bar_.link_button("Share resolution", complaints.whatsapp_url(res, r["reporter"]),
+                             icon=":material/share:", help="Opens WhatsApp with the message filled in - you press Send.")
+        with st.expander("Message text"):
+            st.write(ack)
+            if res:
+                st.write(res)
+            else:
+                st.caption("The resolution message can be sent once a person has closed the complaint.")
+        if "wa.me/?" in complaints.whatsapp_url("", r["reporter"]):
+            st.caption("No mobile number under 'Reported by' - WhatsApp will ask which contact to send to.")
 
 
 def page() -> None:

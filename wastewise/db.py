@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS events (
     fill_before REAL,              -- crew estimate of how full it was
     synthetic INTEGER NOT NULL DEFAULT 0,
     user TEXT,
+    person TEXT,                   -- the crew member who tapped (the account is shared by the truck)
     note TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_events_bin_ts ON events(bin_id, ts);
@@ -148,6 +149,22 @@ CREATE TABLE IF NOT EXISTS beats (
     bin_id TEXT PRIMARY KEY,
     vehicle_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS crew_members (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    vehicle_id TEXT,               -- the truck the person usually works on (any truck can be chosen)
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS truck_crew (
+    day TEXT NOT NULL,             -- YYYY-MM-DD
+    vehicle_id TEXT NOT NULL,
+    members TEXT NOT NULL,         -- JSON list of names on the truck that day
+    holder TEXT,                   -- who is using the crew phone
+    set_by TEXT,
+    ts INTEGER NOT NULL,
+    PRIMARY KEY (day, vehicle_id)
+);
 CREATE TABLE IF NOT EXISTS synthetic_truth (
     bin_id TEXT NOT NULL,
     ts INTEGER NOT NULL,
@@ -199,6 +216,8 @@ def init(conn: sqlite3.Connection) -> None:
     # additive migrations for databases created by an older version
     if "rest_days" not in _columns(conn, "bins"):
         conn.execute("ALTER TABLE bins ADD COLUMN rest_days TEXT NOT NULL DEFAULT ''")
+    if "person" not in _columns(conn, "events"):
+        conn.execute("ALTER TABLE events ADD COLUMN person TEXT")
     migrate_demo_register(conn)
 
 
@@ -331,10 +350,10 @@ def add_reading(conn: sqlite3.Connection, bin_id: str, fill_pct: float | None, s
 def add_event(conn: sqlite3.Connection, kind: str, bin_id: str | None = None,
               vehicle_id: str | None = None, plan_id: int | None = None,
               fill_before: float | None = None, ts: int | None = None,
-              user: str | None = None, note: str | None = None) -> int:
+              user: str | None = None, note: str | None = None, person: str | None = None) -> int:
     cur = conn.execute(
-        "INSERT INTO events(ts, bin_id, vehicle_id, plan_id, kind, fill_before, synthetic, user, note) "
-        "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
-        (ts or now(), bin_id, vehicle_id, plan_id, kind, fill_before, user, note))
+        "INSERT INTO events(ts, bin_id, vehicle_id, plan_id, kind, fill_before, synthetic, user, note, person) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+        (ts or now(), bin_id, vehicle_id, plan_id, kind, fill_before, user, note, person))
     bump_version(conn)
     return int(cur.lastrowid)

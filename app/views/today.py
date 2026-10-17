@@ -5,7 +5,7 @@ import streamlit as st
 
 from datetime import datetime
 
-from wastewise import config, db, evening, fmt, jobs, pdfs, planner, roads
+from wastewise import config, crews, db, evening, fmt, jobs, pdfs, planner, roads
 
 from ui import maps
 from ui.tables import Col, table
@@ -86,9 +86,8 @@ def job_panel(key: str) -> None:
 def route_pdf(p: dict, routes: list[dict]) -> bytes:
     """Printable PDF route sheet(s) for the given routes."""
     c = conn()
-    crew = {r["vehicle_id"]: r["display_name"] for r in
-            db.rows(c, "SELECT vehicle_id, display_name FROM users WHERE role='crew' AND active=1")}
-    return pdfs.route_sheets(p, routes, crew, db.places(c)["depot"]["name"])
+    # crew names as entered on the crew phone that morning (blank line to write on otherwise)
+    return pdfs.route_sheets(p, routes, crews.names_for_day(c, p["plan_date"]), db.places(c)["depot"]["name"])
 
 
 def summary_card(p: dict) -> None:

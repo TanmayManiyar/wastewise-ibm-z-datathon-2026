@@ -116,6 +116,13 @@ ROUTE_COLS = [("STOP", 13), ("ARRIVAL", 18), ("BIN", 19), ("LANDMARK", 64), ("ST
               ("MAP", 13), ("DONE", 17), ("FILL WHEN EMPTIED", 49)]
 
 
+def _short(names: str | None, limit: int = 48) -> str:
+    """Crew names for the sheet header (long lists are shortened so the header fits on one line)."""
+    if not names:
+        return ""
+    return names if len(names) <= limit else names[:limit - 3].rsplit(",", 1)[0] + ", ..."
+
+
 def _fill_text(p: float) -> str:
     return fmt.fill(p).capitalize()
 
@@ -142,7 +149,7 @@ def route_sheets(plan: dict, routes: list[dict], crew: dict[str, str] | None = N
         title = ("Evening collection route sheet" if plan.get("kind") == "extra" else "Collection route sheet")
         info = [("Date", _date(plan["plan_date"])), ("Departure", f"{_hm(r['start_ts'])} from {depot}"),
                 ("Planned return", _hm(t["end_ts"])), ("Stops", str(t["bins"])),
-                ("Distance", fmt.km1(t["distance_km"])), ("Driver", crew.get(r["vehicle_id"]) or "____________")]
+                ("Distance", fmt.km1(t["distance_km"])), ("Crew", _short(crew.get(r["vehicle_id"])) or "____________")]
 
         def new_page():
             pdf.add_page()

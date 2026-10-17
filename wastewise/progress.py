@@ -79,7 +79,7 @@ def status_rows(conn: sqlite3.Connection, day: str, now_ts: int, late_min: int |
             row = dict(p, actual_ts=None, fill_reported=None, delay_min=None, by=None,
                        round="Evening" if round_ == "extra" else "Morning")
             if e:
-                row.update(actual_ts=e["ts"], fill_reported=e["fill_before"], by=e["user"])
+                row.update(actual_ts=e["ts"], fill_reported=e["fill_before"], by=e.get("person") or e["user"])
                 row["delay_min"] = round((e["ts"] - p["planned_ts"]) / 60)
                 if e["kind"] == "collected":
                     row["status"] = "late" if row["delay_min"] > late_min else "collected"
@@ -200,13 +200,15 @@ def load_on_board(conn: sqlite3.Connection, plan: dict, route: dict, bins: dict[
 
 def record_crew(conn: sqlite3.Connection, plan: dict, vehicle_id: str, kind: str, user: str,
                 bin_id: str | None = None, fill: float | None = None, ts: int | None = None,
-                note: str | None = None) -> None:
+                note: str | None = None, person: str | None = None) -> None:
+    """person: the crew member who tapped (crew accounts are shared by everyone on the truck)."""
     ts = ts or db.now()
     with db.tx(conn):
-        db.add_event(conn, kind, bin_id, vehicle_id, plan["id"], fill_before=fill, ts=ts, user=user, note=note)
+        db.add_event(conn, kind, bin_id, vehicle_id, plan["id"], fill_before=fill, ts=ts, user=user, note=note,
+                     person=person)
         if kind == "collected" and bin_id:
             db.add_reading(conn, bin_id, 2.0, "crew", ts=ts + 1, user=user, note="emptied")
         if kind == "could_not_reach" and bin_id and fill is not None:
             db.add_reading(conn, bin_id, fill, "crew", ts=ts, user=user, note="seen, not collected")
         audit.log(conn, user, f"crew_{kind}", {"plan_id": plan["id"], "vehicle": vehicle_id, "bin_id": bin_id,
-                                               "fill": fill, "note": note})
+                                               "fill": fill, "note": note, "person": person})

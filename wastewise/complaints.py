@@ -306,13 +306,134 @@ def record(conn, text: str, bin_id: str | None, und: Understanding, user: str | 
     return cid
 
 
+NOT_A_PERSON = {"", "system", "synthetic", "api", "demo-feed"}
+
+
 def resolve(conn, cid: int, user: str, note: str | None = None) -> None:
+    """Close a complaint. Only a person does this (a signed-in user pressing Close): WasteWise never
+    closes complaints by itself, even when the bin has been collected."""
     from . import audit, db
+    if not user or user.strip().lower() in NOT_A_PERSON or user.startswith("api:"):
+        raise ValueError("Complaints are closed only by a person")
+    r = db.one(conn, "SELECT * FROM complaints WHERE id=?", (cid,))
+    if not r or r["status"] == "resolved":
+        return
+    f = followup(conn, r)
     with db.tx(conn):
         conn.execute("UPDATE complaints SET status='resolved', resolved_by=?, resolved_at=? WHERE id=?",
                      (user, db.now(), cid))
-        audit.log(conn, user, "complaint_resolved", {"complaint_id": cid, "note": note})
+        audit.log(conn, user, "complaint_resolved", {"complaint_id": cid, "ref": ref(cid), "note": note,
+                                                     "collected": followup_text(f) if f else None})
         db.bump_version(conn)
+
+
+# ------------------------------------------------------------------ follow-up and citizen messages
+def ref(cid: int) -> str:
+    """Reference number the citizen is given: SNP-C-0042."""
+    return f"SNP-C-{int(cid):04d}"
+
+
+def followup(conn, complaint: dict) -> dict | None:
+    """The first collection of the complaint's bin after the complaint came in, if any:
+    {"ts", "vehicle_id", "vehicle_name", "by"} (by = crew member's name, else the account)."""
+    from . import db
+    if not complaint.get("bin_id"):
+        return None
+    e = db.one(conn, "SELECT * FROM events WHERE bin_id=? AND kind='collected' AND ts>=? ORDER BY ts LIMIT 1",
+               (complaint["bin_id"], complaint["ts"]))
+    if not e:
+        return None
+    v = db.one(conn, "SELECT name FROM vehicles WHERE id=?", (e["vehicle_id"],)) if e["vehicle_id"] else None
+    return {"ts": e["ts"], "vehicle_id": e["vehicle_id"], "vehicle_name": v["name"] if v else "a truck",
+            "by": e.get("person") or e["user"]}
+
+
+def followup_text(f: dict) -> str:
+    from . import fmt
+    return f"Bin collected at {fmt.hhmm(f['ts'])} on {fmt.when(f['ts']).rsplit(' ', 1)[0]} by {f['vehicle_name']}"
+
+
+def ready_to_close(conn, limit: int = 50) -> list[dict]:
+    """Open complaints whose bin has been collected since: a person should check and close them."""
+    from . import db
+    out = []
+    for r in db.rows(conn, "SELECT * FROM complaints WHERE status='open' ORDER BY ts DESC LIMIT 300"):
+        f = followup(conn, r)
+        if f:
+            out.append(dict(r, followup=f))
+        if len(out) >= limit:
+            break
+    return out
+
+
+PROBLEM_HI = {"overflowing": "कचरा बाहर गिरने", "full": "भरे हुए कूड़ेदान", "fire": "आग", "dead_animal": "मरे हुए जानवर",
+              "not_collected": "कचरा न उठाए जाने", "damaged": "टूटे कूड़ेदान", "smell": "बदबू", "other": "समस्या"}
+PROBLEM_MR = {"overflowing": "कचरा वाहून जाण्या", "full": "भरलेल्या कचराकुंडी", "fire": "आग", "dead_animal": "मेलेल्या जनावरा",
+              "not_collected": "कचरा न उचलण्या", "damaged": "तुटलेल्या कचराकुंडी", "smell": "दुर्गंधी", "other": "समस्ये"}
+
+ACK = {
+    "en": "Sanpada ward office (NMMC): your complaint {ref} about {problem} at {place} was received on {when}. "
+          "We will clear it and tell you when it is done.",
+    "hi": "सानपाडा वार्ड कार्यालय (NMMC): {place} पर {problem} के बारे में आपकी शिकायत {ref} {when} को मिली है। "
+          "हम इसे साफ़ करवाकर आपको बताएँगे।",
+    "mr": "सानपाडा प्रभाग कार्यालय (NMMC): {place} येथील {problem}बाबत तुमची तक्रार {ref} {when} रोजी मिळाली आहे. "
+          "आम्ही ती सोडवून तुम्हाला कळवू.",
+}
+RES = {
+    "en": "Sanpada ward office (NMMC): your complaint {ref} at {place} - the bin was emptied on {done} by {truck}. "
+          "The complaint is now closed. Thank you for telling us.",
+    "hi": "सानपाडा वार्ड कार्यालय (NMMC): {place} पर आपकी शिकायत {ref} - कूड़ेदान {done} को {truck} ने खाली कर दिया। "
+          "शिकायत बंद कर दी गई है। बताने के लिए धन्यवाद।",
+    "mr": "सानपाडा प्रभाग कार्यालय (NMMC): {place} येथील तुमची तक्रार {ref} - कचराकुंडी {done} रोजी {truck} ने रिकामी केली. "
+          "तक्रार बंद केली आहे. कळवल्याबद्दल धन्यवाद.",
+}
+RES_NO_COLLECTION = {
+    "en": "Sanpada ward office (NMMC): your complaint {ref} at {place} has been dealt with and is now closed. "
+          "Thank you for telling us.",
+    "hi": "सानपाडा वार्ड कार्यालय (NMMC): {place} पर आपकी शिकायत {ref} का समाधान हो गया है और शिकायत बंद कर दी गई है। "
+          "बताने के लिए धन्यवाद।",
+    "mr": "सानपाडा प्रभाग कार्यालय (NMMC): {place} येथील तुमच्या तक्रारीचे {ref} निराकरण झाले असून तक्रार बंद केली आहे. "
+          "कळवल्याबद्दल धन्यवाद.",
+}
+TRUCK = {"en": "Truck", "hi": "गाड़ी", "mr": "गाडी"}
+
+
+def message_lang(complaint: dict) -> str:
+    return complaint.get("lang") if complaint.get("lang") in ("hi", "mr") else "en"
+
+
+def acknowledgement(complaint: dict, place: str, lang: str = "en") -> str:
+    from . import fmt
+    lang = lang if lang in ACK else "en"
+    prob = complaint.get("problem") or "other"
+    word = {"en": PROBLEM_WORDS.get(prob, "a problem"), "hi": PROBLEM_HI.get(prob, "समस्या"),
+            "mr": PROBLEM_MR.get(prob, "समस्ये")}[lang]
+    return ACK[lang].format(ref=ref(complaint["id"]), problem=word, place=place, when=fmt.when(complaint["ts"]))
+
+
+def resolution(conn, complaint: dict, place: str, lang: str = "en") -> str:
+    from . import fmt
+    lang = lang if lang in RES else "en"
+    f = followup(conn, complaint)
+    if not f:
+        return RES_NO_COLLECTION[lang].format(ref=ref(complaint["id"]), place=place)
+    truck = f["vehicle_name"].replace("Truck", TRUCK[lang]).replace(" (small)", "")
+    return RES[lang].format(ref=ref(complaint["id"]), place=place, done=fmt.when(f["ts"]), truck=truck)
+
+
+def whatsapp_url(text: str, reporter: str | None = None) -> str:
+    """wa.me link with the message filled in. If the reporter field holds an Indian mobile number the chat
+    opens with that number; otherwise WhatsApp asks which contact. The user still presses Send."""
+    import urllib.parse
+    digits = re.sub(r"\D", "", reporter or "")
+    phone = ""
+    if len(digits) == 10 and digits[0] in "6789":
+        phone = "91" + digits
+    elif len(digits) == 12 and digits.startswith("91") and digits[2] in "6789":
+        phone = digits
+    elif len(digits) == 11 and digits.startswith("0") and digits[1] in "6789":
+        phone = "91" + digits[1:]
+    return f"https://wa.me/{phone}?" + urllib.parse.urlencode({"text": text})
 
 
 def move(conn, cid: int, new_bin: str, user: str) -> None:

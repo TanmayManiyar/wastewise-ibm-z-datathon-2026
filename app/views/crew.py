@@ -5,7 +5,7 @@ import urllib.parse
 
 import streamlit as st
 
-from wastewise import db, fmt, planner, progress
+from wastewise import crews, db, fmt, planner, progress
 
 from ui.common import can, conn, hhmm, live_refresh, mark_seen, user
 from ui.i18n import LANGS, t
@@ -53,6 +53,11 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
         st.warning(t("updated", lang) + f" ({hhmm(plan.get('approved_at'))})", icon=":material/sync:")
     st.session_state[f"{key}_plan_seen"] = plan["id"]
 
+    person = None
+    if interactive:
+        person = _who(plan["plan_date"], vehicle_id, lang, key)
+        if person is None:
+            return          # the crew first says who is on the truck today
     states = progress.stop_states(c, plan, route)
     bins = {b["id"]: b for b in db.bins(c, active_only=False)}
     vrow = next((v for v in db.vehicles(c, active_only=False) if v["id"] == vehicle_id), None)
@@ -80,7 +85,7 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
                        icon=":material/map:")
         if interactive and st.button(t("unloaded", lang), type="primary", use_container_width=True,
                                      key=f"{key}_unload"):
-            progress.record_crew(c, plan, vehicle_id, "landfill_unload", user()["username"])
+            progress.record_crew(c, plan, vehicle_id, "landfill_unload", user()["username"], person=person)
             st.session_state[f"{key}_saved"] = "landfill_unload"
             mark_seen()
             st.rerun()
@@ -103,18 +108,20 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
         if fill_pct is None:
             st.warning(t("choose_fill", lang))
         else:
-            progress.record_crew(c, plan, vehicle_id, "collected", user()["username"], s["bin_id"], fill_pct)
+            progress.record_crew(c, plan, vehicle_id, "collected", user()["username"], s["bin_id"], fill_pct,
+                                 person=person)
             st.session_state[f"{key}_saved"] = "collected"
             mark_seen()
             st.rerun()
     if c2.button(t("not_reach", lang), use_container_width=True, key=f"{key}_nr_{s['bin_id']}", icon=":material/block:"):
-        progress.record_crew(c, plan, vehicle_id, "could_not_reach", user()["username"], s["bin_id"], fill_pct)
+        progress.record_crew(c, plan, vehicle_id, "could_not_reach", user()["username"], s["bin_id"], fill_pct,
+                             person=person)
         st.session_state[f"{key}_saved"] = "could_not_reach"
         mark_seen()
         st.rerun()
     if c3.button(t("missing", lang), use_container_width=True, key=f"{key}_ms_{s['bin_id']}",
                  icon=":material/help:"):
-        progress.record_crew(c, plan, vehicle_id, "bin_missing", user()["username"], s["bin_id"])
+        progress.record_crew(c, plan, vehicle_id, "bin_missing", user()["username"], s["bin_id"], person=person)
         st.session_state[f"{key}_saved"] = "bin_missing"
         mark_seen()
         st.rerun()
@@ -127,6 +134,42 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
                 st.write(f"{mark} {k}. {hhmm(x['arrive_ts'])} · {x['landmark']}")
             elif x["kind"] == "landfill":
                 st.write(f"{'✅' if st_ == 'done' else '🚛'} {hhmm(x['arrive_ts'])} · {t('landfill', lang)}")
+
+
+def _who(day: str, vehicle_id: str, lang: str, key: str) -> str | None:
+    """Who is on the truck today and who is using this phone. Crews answer once per day (kept on the
+    server, so a reload does not ask again); office users recording on the crew's behalf are named as such."""
+    u = user()
+    if u["role"] != "crew":
+        return f"{u['display_name']} (office)"
+    c = conn()
+    cur = crews.on_truck(c, day, vehicle_id)
+    editing = st.session_state.get(f"{key}_edit_crew")
+    if cur and not editing:
+        a, b = st.columns([3, 1])
+        a.caption(f"👥 {t('crew_today', lang)}: {', '.join(cur['members'])} · 📱 {cur['holder'] or '-'}")
+        if b.button(t("change", lang), key=f"{key}_chg_crew"):
+            st.session_state[f"{key}_edit_crew"] = True
+            st.rerun()
+        return cur["holder"] or cur["members"][0]
+    people = crews.members(c)
+    own = [m["name"] for m in people if m["vehicle_id"] == vehicle_id]
+    names = own + [m["name"] for m in people if m["vehicle_id"] != vehicle_id]
+    with st.container(border=True):
+        st.markdown(f"### 👥 {t('who_today', lang)}")
+        if not names:
+            st.warning(t("no_crew_list", lang))
+            return None
+        chosen = st.pills(t("who_today", lang), names, selection_mode="multi", label_visibility="collapsed",
+                          default=(cur["members"] if cur else own) or None, key=f"{key}_crew_pick_{day}")
+        holder = st.radio(t("who_phone", lang), chosen or [], index=None, key=f"{key}_holder_{day}")
+        if st.button(t("start_shift", lang), type="primary", use_container_width=True, disabled=not (chosen and holder),
+                     key=f"{key}_crew_save"):
+            crews.set_on_truck(c, day, vehicle_id, list(chosen), holder, u["username"])
+            st.session_state.pop(f"{key}_edit_crew", None)
+            mark_seen()
+            st.rerun()
+    return None
 
 
 def page() -> None:

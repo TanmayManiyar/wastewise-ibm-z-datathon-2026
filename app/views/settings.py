@@ -5,7 +5,7 @@ import json
 
 import streamlit as st
 
-from wastewise import (audit, auth, beats, db, fmt, forecast, mildura, osm, platform_info, roads, synth, telum)
+from wastewise import (audit, auth, beats, crews, db, fmt, forecast, mildura, osm, platform_info, roads, synth, telum)
 
 from ui.common import can, conn, mark_seen, user, when
 from ui.tables import Col, maps_url, table
@@ -272,6 +272,38 @@ def fleet_tab() -> None:
             st.write(" · ".join(f"{names.get(v, v)}: {n} bins" for v, n in counts.items()))
 
 
+def crew_list() -> None:
+    """The people who work on the trucks. The crew phone asks each morning who is on the truck, and every
+    tap stores that person's name."""
+    c = conn()
+    st.markdown("**Crew members** (the names the crew phone offers at the start of each shift)")
+    vn = {v["id"]: v["name"] for v in db.vehicles(c, active_only=False)}
+    ms = crews.members(c, active_only=False)
+    if ms:
+        table([{"name": m["name"], "truck": vn.get(m["vehicle_id"], "any truck"),
+                "active": ("On the list", "green") if m["active"] else ("Removed", "grey")} for m in ms],
+              [Col("name", "Name"), Col("truck", "Usually on"), Col("active", "", "pill")], max_height=300)
+    a, b = st.columns(2)
+    with a.form("crew_add", clear_on_submit=True):
+        name = st.text_input("Name")
+        veh = st.selectbox("Usually on", [None] + list(vn), format_func=lambda x: "any truck" if x is None else vn[x])
+        if st.form_submit_button("Add to the crew list"):
+            try:
+                crews.add_member(c, name, veh, user()["username"])
+                st.success(f"Added {name.strip()}.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    with b.form("crew_remove"):
+        active = [m for m in ms if m["active"]]
+        mid = st.selectbox("Remove from the list", [m["id"] for m in active], index=None,
+                           format_func=lambda i: next(m["name"] for m in active if m["id"] == i),
+                           placeholder="choose the person")
+        if st.form_submit_button("Remove") and mid:
+            crews.set_active(c, mid, False, user()["username"])
+            st.rerun()
+
+
 def users_tab() -> None:
     c = conn()
     if not can("manage_users"):
@@ -312,6 +344,7 @@ def users_tab() -> None:
                     c.execute("UPDATE users SET active=? WHERE username=?", (int(act == "activate"), who))
                     audit.log(c, user()["username"], f"user_{act}d", {"username": who})
                 st.success(f"{who}: {act}d")
+    crew_list()
     with st.expander("Your own password"):
         with st.form("own_pw", clear_on_submit=True):
             p1 = st.text_input("New password", type="password")
