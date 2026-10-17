@@ -46,10 +46,14 @@ def status_rows(conn: sqlite3.Connection, day: str, now_ts: int, late_min: int |
     late_min = late_min if late_min is not None else int(settings["late_threshold_min"])
     shift_start, shift_end = planner.shift_window(settings, __import__("datetime").date.fromisoformat(day))
     planned = planned_stops(plans)
+    ids = [p["id"] for p in plans]
     rows = []
     for bid, p in sorted(planned.items(), key=lambda kv: (kv[1]["vehicle_id"], kv[1]["planned_ts"])):
+        # A crew update counts if it belongs to one of the day's plans (even when tapped before the shift,
+        # e.g. in a rehearsal) or was made during the shift window.
         e = db.one(conn, "SELECT * FROM events WHERE bin_id=? AND kind IN ('collected','could_not_reach','bin_missing')"
-                         " AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 1", (bid, shift_start - 3600, shift_end + 4 * 3600))
+                         f" AND (plan_id IN ({','.join('?' * len(ids))}) OR ts BETWEEN ? AND ?) ORDER BY ts DESC LIMIT 1",
+                   (bid, *ids, shift_start - 3600, shift_end + 4 * 3600))
         row = dict(p, actual_ts=None, fill_reported=None, delay_min=None, by=None)
         if e:
             row.update(actual_ts=e["ts"], fill_reported=e["fill_before"], by=e["user"])
@@ -114,13 +118,17 @@ def stop_states(conn: sqlite3.Connection, plan: dict, route: dict) -> list[str]:
     settings = db.get_settings(conn)
     shift_start, _ = planner.shift_window(settings, __import__("datetime").date.fromisoformat(plan["plan_date"]))
     since = shift_start - 3600
+    ids = [p["id"] for p in day_plans(conn, plan["plan_date"])] or [plan["id"]]
+    if plan["id"] not in ids:
+        ids.append(plan["id"])
     unloads = conn.execute("SELECT COUNT(*) FROM events WHERE kind='landfill_unload' AND vehicle_id=? AND plan_id=?",
                            (route["vehicle_id"], plan["id"])).fetchone()[0]
     out, lf_seen = [], 0
     for s in route["stops"]:
         if s["kind"] == "bin":
             e = conn.execute("SELECT 1 FROM events WHERE bin_id=? AND kind IN ('collected','could_not_reach','bin_missing')"
-                             " AND ts>=? LIMIT 1", (s["bin_id"], since)).fetchone()
+                             f" AND (plan_id IN ({','.join('?' * len(ids))}) OR ts>=?) LIMIT 1",
+                             (s["bin_id"], *ids, since)).fetchone()
             out.append("done" if e else "todo")
         elif s["kind"] == "landfill":
             lf_seen += 1

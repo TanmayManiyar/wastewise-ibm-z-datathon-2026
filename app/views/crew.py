@@ -36,6 +36,9 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
     lang = _language(key)
     if title:
         st.markdown(f"## {t('title', lang)} · {title.replace('Truck', t('truck', lang)).replace('(small)', t('small', lang))}")
+    saved = st.session_state.pop(f"{key}_saved", None)
+    if saved:
+        st.success(f"✔ {t('saved', lang)}", icon=":material/check_circle:")
     plan, route = progress.route_for(c, day, vehicle_id)
     if not route:
         st.info(t("no_route", lang))
@@ -73,6 +76,7 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
         if interactive and st.button(t("unloaded", lang), type="primary", use_container_width=True,
                                      key=f"{key}_unload"):
             progress.record_crew(c, plan, vehicle_id, "landfill_unload", user()["username"])
+            st.session_state[f"{key}_saved"] = "landfill_unload"
             mark_seen()
             st.rerun()
         if s["kind"] == "landfill":
@@ -95,15 +99,18 @@ def render(vehicle_id: str, day: str, interactive: bool = True, key: str = "crew
             st.warning(t("choose_fill", lang))
         else:
             progress.record_crew(c, plan, vehicle_id, "collected", user()["username"], s["bin_id"], fill_pct)
+            st.session_state[f"{key}_saved"] = "collected"
             mark_seen()
             st.rerun()
     if c2.button(t("not_reach", lang), use_container_width=True, key=f"{key}_nr_{s['bin_id']}", icon=":material/block:"):
         progress.record_crew(c, plan, vehicle_id, "could_not_reach", user()["username"], s["bin_id"], fill_pct)
+        st.session_state[f"{key}_saved"] = "could_not_reach"
         mark_seen()
         st.rerun()
     if c3.button(t("missing", lang), use_container_width=True, key=f"{key}_ms_{s['bin_id']}",
                  icon=":material/help:"):
         progress.record_crew(c, plan, vehicle_id, "bin_missing", user()["username"], s["bin_id"])
+        st.session_state[f"{key}_saved"] = "bin_missing"
         mark_seen()
         st.rerun()
     with st.expander(t("remaining", lang)):

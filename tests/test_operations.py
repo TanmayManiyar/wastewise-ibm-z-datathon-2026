@@ -114,6 +114,22 @@ def test_crew_next_stop_and_landfill(conn, approved):
     assert last["source"] == "crew" and last["fill_pct"] <= 5
 
 
+def test_crew_taps_before_the_shift_still_count(conn, approved):
+    """Rehearsing tomorrow's route today (before the shift window) must still move to the next stop."""
+    r = next(x for x in approved["routes"] if x["stops"])
+    first = next(s for s in r["stops"] if s["kind"] == "bin")
+    early = approved["start_ts"] - 20 * 3600            # the evening before the shift
+    progress.record_crew(conn, approved, r["vehicle_id"], "collected", "crew", first["bin_id"], 75, ts=early)
+    assert progress.stop_states(conn, approved, r)[r["stops"].index(first)] == "done"
+    rows = {x["bin_id"]: x for x in progress.status_rows(conn, approved["plan_date"], early + 60)}
+    assert rows[first["bin_id"]]["status"] in ("collected", "late")
+    for kind in ("could_not_reach", "bin_missing"):
+        nxt = next(s for s, st in zip(r["stops"], progress.stop_states(conn, approved, r))
+                   if s["kind"] == "bin" and st == "todo")
+        progress.record_crew(conn, approved, r["vehicle_id"], kind, "crew", nxt["bin_id"], ts=early + 60)
+        assert progress.stop_states(conn, approved, r)[r["stops"].index(nxt)] == "done"
+
+
 # ---------------------------------------------------------------- live alerts, demo feed, test events
 def test_test_events_show_in_live_alerts(conn):
     desc = live.inject(conn, "hindi_complaint", "SNP-040", "admin")
