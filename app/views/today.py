@@ -29,6 +29,12 @@ def _plan_choices(day) -> list[dict]:
     rows = db.rows(c, "SELECT id, status, kind, created_at, created_by FROM plans WHERE plan_date=?"
                       " AND kind IN ('daily','replan') AND status<>'superseded' ORDER BY id DESC LIMIT 6",
                    (day.isoformat(),))
+    # the approved plan is always offered, even when newer drafts push it out of the latest six
+    appr = db.one(c, "SELECT id, status, kind, created_at, created_by FROM plans WHERE plan_date=?"
+                     " AND kind IN ('daily','replan') AND status='approved' ORDER BY id DESC LIMIT 1",
+                  (day.isoformat(),))
+    if appr and appr["id"] not in [r["id"] for r in rows]:
+        rows.append(appr)
     return rows
 
 
