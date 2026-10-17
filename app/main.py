@@ -11,7 +11,7 @@ sys.path.insert(0, str(APP.parent))
 import streamlit as st  # noqa: E402
 
 st.set_page_config(page_title="WasteWise · Sanpada", page_icon=":material/recycling:", layout="wide",
-                   initial_sidebar_state="expanded")
+                   initial_sidebar_state="auto")
 
 from ui.common import conn, css, header_badge, log, user  # noqa: E402
 from views import bins, crew, help as help_view, login, reports, settings, today, whatif  # noqa: E402

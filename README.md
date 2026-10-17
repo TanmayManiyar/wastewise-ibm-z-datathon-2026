@@ -181,5 +181,5 @@ bash scripts/services.sh start                  # web app :8501 and REST API :86
 
 `wastewise/` engine (db, osm, roads, area, synth, state, risk, forecast, anomaly, telum, optimiser,
 baseline, verifier, beats, planner, progress, complaints, live, api, llm, reports, auth, audit) ·
-`app/` Streamlit UI · `tests/` (89 tests) · `scripts/` setup, training, benchmarks, evidence, services ·
+`app/` Streamlit UI · `tests/` (90 tests) · `scripts/` setup, training, benchmarks, evidence, services ·
 `deploy/` systemd units · `Containerfile` · `docs/S390X_NOTES.md`
