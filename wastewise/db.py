@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS readings (
     fill_pct REAL,                 -- 0..100 (sensor may saturate at 100)
     source TEXT NOT NULL,          -- sensor | supervisor | crew | complaint | api
     synthetic INTEGER NOT NULL DEFAULT 0,
-    fault INTEGER NOT NULL DEFAULT 0,  -- ground-truth fault label (synthetic data only)
+    fault INTEGER NOT NULL DEFAULT 0,  -- synthetic ground truth: 0 none, 1 stuck, 2 drift, 3 spike
     user TEXT,
     note TEXT
 );

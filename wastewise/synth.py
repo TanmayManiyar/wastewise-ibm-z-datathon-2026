@@ -261,16 +261,16 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
             # Stuck sensor: repeats one value for 1-3 days.
             for _ in range(r.poisson(days / 120)):
                 s = int(r.integers(0, H - 24)); L = int(r.integers(12, 48))
-                obs[s:s + L] = obs[s]; fault[s:s + L] = 1
+                obs[s:s + L] = obs[s]; fault[s:s + L] = 1      # 1 = stuck
             # Drift: reading creeps upwards over 5-10 days.
             for _ in range(r.poisson(days / 180)):
                 s = int(r.integers(0, H - 120)); L = int(r.integers(72, 168))
                 L = min(L, H - s)
-                obs[s:s + L] += np.linspace(0, float(r.uniform(15, 35)), L); fault[s:s + L] = 1
+                obs[s:s + L] += np.linspace(0, float(r.uniform(15, 35)), L); fault[s:s + L] = 2  # 2 = drift
             # Spikes (more in the monsoon: water on the ultrasonic sensor).
             p_spike = np.where(mon, 0.006, 0.003)
             spikes = r.random(H) < p_spike
-            obs[spikes] = r.choice([0.0, 100.0], spikes.sum()); fault[spikes] = 1
+            obs[spikes] = r.choice([0.0, 100.0], spikes.sum()); fault[spikes] = 3  # 3 = spike
             obs = np.clip(obs, 0, 100)
             # Dropouts: random missing hours and occasional outages.
             keep = r.random(H) > 0.02
@@ -280,7 +280,7 @@ def generate(conn: sqlite3.Connection, end_ts: int | None = None, days: int = 18
             for i in np.nonzero(keep)[0]:
                 readings.append((sp.id, int(hour_ts[i] + offs[i]), round(float(obs[i]), 1), "sensor", 1,
                                  int(fault[i]), "synthetic", None))
-            stats["faults"] += int(fault[keep].sum())
+            stats["faults"] += int((fault[keep] > 0).sum())
         else:
             # Supervisor walks past most days and estimates to the nearest 10 %.
             for i in np.nonzero((hod >= 11) & (hod <= 17))[0]:

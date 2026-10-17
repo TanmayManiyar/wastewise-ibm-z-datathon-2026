@@ -65,13 +65,11 @@ def _rates(conn, at_ts: int, hours: int, bins: list[dict], bad_sensors: set[str]
     st = state.estimate(conn, at_ts, profiles, bad_sensors=bad_sensors)
     rates = {b["id"]: state.profile_rates(profiles[b["id"]], at_ts, hours) for b in bins}
     source = "hourly profile (baseline)"
-    try:
-        from . import forecast
-        ml = forecast.predict_rates(conn, at_ts, hours, bins, st)
-        if ml is not None:
-            rates, source = ml["rates"], ml["source"]
-    except ImportError:
-        pass
+    from . import forecast
+    ml = forecast.predict_rates(conn, at_ts, hours, [b for b in bins if b["id"] not in bad_sensors], st,
+                                fallback=rates)
+    if ml is not None:
+        rates, source = ml["rates"], ml["source"]
     return st, rates, profiles, source
 
 

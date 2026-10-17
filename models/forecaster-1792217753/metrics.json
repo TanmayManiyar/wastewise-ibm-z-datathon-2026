@@ -1,0 +1,60 @@
+{
+  "label": "trained and tested on SYNTHETIC demonstration data",
+  "rows": {
+    "train": 158790,
+    "validation": 51565,
+    "test": 49670
+  },
+  "test_window": {
+    "val_start": "2026-08-09T03:06:00+05:30",
+    "test_start": "2026-09-12T16:18:00+05:30",
+    "test_end": "2026-10-17T05:30:00+05:30"
+  },
+  "test": {
+    "hgb": {
+      "mae_3h_points": 3.768,
+      "rmse_3h_points": 5.294,
+      "bias_3h_points": 0.743
+    },
+    "gbt": {
+      "mae_3h_points": 3.701,
+      "rmse_3h_points": 5.157,
+      "bias_3h_points": 0.779
+    },
+    "ensemble": {
+      "mae_3h_points": 3.714,
+      "rmse_3h_points": 5.189,
+      "bias_3h_points": 0.761
+    },
+    "same_hour_last_7_days": {
+      "mae_3h_points": 4.153,
+      "rmse_3h_points": 6.064,
+      "bias_3h_points": -0.157
+    },
+    "mean_rate_last_7_days": {
+      "mae_3h_points": 7.164,
+      "rmse_3h_points": 9.278,
+      "bias_3h_points": 0.06
+    },
+    "last_24_hours": {
+      "mae_3h_points": 7.474,
+      "rmse_3h_points": 9.97,
+      "bias_3h_points": 0.436
+    }
+  },
+  "gbt_library": "lightgbm",
+  "hgb_iterations": 300,
+  "gbt_iterations": 152,
+  "train_seconds": 25.5,
+  "best_model": "gbt",
+  "decision": {
+    "new_mae": 3.701,
+    "best_baseline_mae": 4.153,
+    "current_promoted_mae": null,
+    "promoted": true
+  },
+  "gbt_export": {
+    "file": "gbt_lightgbm.txt",
+    "format": "lightgbm"
+  }
+}

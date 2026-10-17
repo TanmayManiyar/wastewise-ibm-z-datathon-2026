@@ -95,7 +95,7 @@ def test_synthetic_rows_are_labelled(conn):
 
 
 def test_sensor_values_in_range_and_faults_labelled(conn):
-    r = db.one(conn, "SELECT MIN(fill_pct) lo, MAX(fill_pct) hi, SUM(fault) f, COUNT(*) n"
+    r = db.one(conn, "SELECT MIN(fill_pct) lo, MAX(fill_pct) hi, SUM(fault > 0) f, COUNT(*) n"
                      " FROM readings WHERE source='sensor'")
     assert 0 <= r["lo"] and r["hi"] <= 100
     assert 0.01 < r["f"] / r["n"] < 0.15
