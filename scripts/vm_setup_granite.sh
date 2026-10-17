@@ -14,7 +14,14 @@ mkdir -p "$BUILD_DIR" "$RUN"
 if [ ! -x "$BUILD_DIR/llama.cpp/build/bin/llama-server" ]; then
     git -C "$BUILD_DIR" clone --depth 1 --branch "$LLAMA_REF" https://github.com/ggml-org/llama.cpp.git 2>/dev/null \
         || git -C "$BUILD_DIR/llama.cpp" pull
-    cmake -S "$BUILD_DIR/llama.cpp" -B "$BUILD_DIR/llama.cpp/build" -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
+    EXTRA=()
+    # llama.cpp picks -march=arch15 on IBM z17, which gcc 13 (Ubuntu 24.04) does not know yet:
+    # build for z16 (arch14) instead - z17 runs z16 code.
+    if [ "$(uname -m)" = "s390x" ] && ! echo | gcc -march=arch15 -x c -E - > /dev/null 2>&1; then
+        EXTRA=(-DGGML_NATIVE=OFF -DCMAKE_C_FLAGS="-march=z16 -mtune=z16" -DCMAKE_CXX_FLAGS="-march=z16 -mtune=z16")
+        rm -rf "$BUILD_DIR/llama.cpp/build"
+    fi
+    cmake -S "$BUILD_DIR/llama.cpp" -B "$BUILD_DIR/llama.cpp/build" -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF "${EXTRA[@]}"
     cmake --build "$BUILD_DIR/llama.cpp/build" -j "$(nproc)" --target llama-server
 fi
 
